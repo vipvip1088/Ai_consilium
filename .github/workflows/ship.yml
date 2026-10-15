@@ -98,9 +98,9 @@ jobs:
         uses: ArtemSBulgakov/buildozer-action@v1
         id: buildozer
         with:
-          command: yes | buildozer -v android debug
+          command: buildozer -v android debug
           workdir: .
-          buildozer_version: master
+          buildozer_version: stable
 
       - name: Show APK outputs
         if: always()
@@ -189,3 +189,7 @@ jobs:
         uses: actions/upload-pages-artifact@v3
         with:
           path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
