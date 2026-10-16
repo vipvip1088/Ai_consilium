@@ -104,7 +104,7 @@ jobs:
         run: |
           export ANDROID_HOME=$HOME/.buildozer/android/platform/android-sdk
           export PATH=$PATH:$ANDROID_HOME/tools:$ANDROID_HOME/platform-tools
-          yes | buildozer -v android debug
+          buildozer -v android debug
 
       - name: Show APK outputs
         if: always()
