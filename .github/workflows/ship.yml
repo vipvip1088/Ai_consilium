@@ -3,21 +3,27 @@ on:
   push:
     branches: [ main ]
   workflow_dispatch:
+
 jobs:
   build-apk:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
+
+      - name: Pull Docker image from GHCR
+        run: docker pull ghcr.io/kivy/buildozer:latest
+
       - name: Build APK inside Kivy Docker
         uses: addnab/docker-run-action@v3
         with:
-          image: kivy/buildozer:latest
-          options: -v ${{ github.workspace }}:/home/user/hostcwd -u 1000:1000
+          image: ghcr.io/kivy/buildozer:latest
+          options: -v ${{ github.workspace }}:/home/user/hostcwd
           run: |
             cd /home/user/hostcwd
             rm -rf .buildozer bin
             buildozer -v android debug < /dev/null
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
