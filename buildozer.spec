@@ -5,7 +5,7 @@ package.domain = org.aicouncil
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 version = 0.1
-requirements = python3,kivy==2.3.0,requests,urllib3,certifi,idna
+requirements = python3,kivy==2.3.0,requests,urllib3,certifi,idna,cython==0.29.36
 orientation = portrait
 fullscreen = 0
 android.permissions = INTERNET
