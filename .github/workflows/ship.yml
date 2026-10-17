@@ -6,25 +6,28 @@ on:
 
 jobs:
   build-apk:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 
-      - name: Pull Docker image from GHCR
-        run: docker pull ghcr.io/kivy/buildozer:latest
+      - name: Установить системные зависимости
+        run: |
+          sudo apt update
+          sudo apt install -y git zip unzip openjdk-17-jdk autoconf automake libtool libtool-bin pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev cmake libffi-dev libssl-dev python3-pip
 
-      - name: Build APK inside Kivy Docker
-        uses: addnab/docker-run-action@v3
-        with:
-          image: ghcr.io/kivy/buildozer:latest
-          options: -v ${{ github.workspace }}:/home/user/hostcwd
-          run: |
-            cd /home/user/hostcwd
-            rm -rf .buildozer bin
-            buildozer -v android debug < /dev/null
+      - name: Установить Buildozer и Cython
+        run: |
+          pip3 install --upgrade buildozer
+          pip3 install cython==0.29.36
 
-      - name: Upload APK
+      - name: Собрать APK
+        run: |
+          export ANDROID_HOME=$HOME/.buildozer/android/platform/android-sdk
+          export PATH=$PATH:$ANDROID_HOME/tools:$ANDROID_HOME/platform-tools
+          buildozer -v android debug
+
+      - name: Загрузить APK
         uses: actions/upload-artifact@v4
         with:
           name: apk
