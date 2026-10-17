@@ -28,7 +28,7 @@ jobs:
           options: -v ${{ github.workspace }}:/home/user/hostcwd
           run: |
             cd /home/user/hostcwd
-            yes | buildozer android debug
+            buildozer android debug
 
       - name: Show APK outputs
         if: always()
