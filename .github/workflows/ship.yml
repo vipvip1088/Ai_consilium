@@ -11,6 +11,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Очистить старый кэш сборки
+        run: |
+          rm -rf .buildozer
+          rm -rf ~/.buildozer
+
       - name: Установить системные зависимости
         run: |
           sudo apt update
@@ -19,7 +24,7 @@ jobs:
       - name: Установить Buildozer и Cython
         run: |
           pip3 install --upgrade buildozer
-          pip3 install cython==3.0.11
+          pip3 install cython==0.29.36
 
       - name: Собрать APK
         run: |
