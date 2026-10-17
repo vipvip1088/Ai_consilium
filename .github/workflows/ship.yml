@@ -1,56 +1,26 @@
 name: Shipit Cloud Build
-
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main ]
   workflow_dispatch:
-
 jobs:
   build-apk:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Ensure buildozer.spec exists
-        run: |
-          if [ ! -f buildozer.spec ]; then
-            echo "ERROR: buildozer.spec missing"
-            exit 1
-          fi
-          head -40 buildozer.spec
-
-      - name: Build APK with Docker image kivy/buildozer
+      - uses: actions/checkout@v4
+      - name: Build APK inside Kivy Docker
         uses: addnab/docker-run-action@v3
         with:
           image: kivy/buildozer:latest
-          options: -v ${{ github.workspace }}:/home/user/hostcwd
+          options: -v ${{ github.workspace }}:/home/user/hostcwd -u 1000:1000
           run: |
             cd /home/user/hostcwd
-            buildozer android debug
-
-      - name: Show APK outputs
-        if: always()
-        run: |
-          ls -la bin/ 2>/dev/null || echo "(no bin yet)"
-          find . -name "*.apk" 2>/dev/null || true
-
+            rm -rf .buildozer bin
+            buildozer -v android debug < /dev/null
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: apk
           path: bin/*.apk
           if-no-files-found: warn
-
-      - name: Create Release
-        if: success()
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: shipit-${{ github.run_number }}
-          name: Shipit Build #${{ github.run_number }}
-          files: bin/*.apk
-          generate_release_notes: true
-          fail_on_unmatched_files: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
