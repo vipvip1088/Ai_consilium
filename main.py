@@ -1,15 +1,22 @@
-import os
+__version__ = "2.0.0"
+# -*- coding: utf-8 -*-
+"""
+AI Council — improved Kivy app.
+Build note: Android's "built for an older version" warning is controlled by
+targetSdkVersion in the Android packaging configuration, not by this Python file.
+See the accompanying Android build notes at the end of this file.
+"""
 import json
-import time
+import os
 import threading
-import requests
-
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import requests
 from kivy.app import App
 from kivy.clock import Clock
-from kivy.metrics import dp
 from kivy.core.window import Window
+from kivy.metrics import dp
 from kivy.graphics import Color, RoundedRectangle
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.gridlayout import GridLayout
@@ -22,348 +29,258 @@ from kivy.uix.slider import Slider
 
 API_ROOT = "https://openrouter.ai/api/v1"
 MAX_ROUNDS = 10
-MAX_RETRIES = 2
-REQUEST_TIMEOUT = (10, 75)
+REQUEST_TIMEOUT = (10, 60)
+MAX_HISTORY = 100
 
-BG = (0.055, 0.067, 0.09, 1)
-PANEL = (0.10, 0.12, 0.16, 1)
-PANEL_ALT = (0.13, 0.16, 0.21, 1)
-ACCENT = (0.42, 0.38, 1.0, 1)
-TEXT = (0.93, 0.95, 0.98, 1)
-MUTED = (0.61, 0.66, 0.74, 1)
-GREEN = (0.32, 0.82, 0.62, 1)
-RED = (1.0, 0.40, 0.43, 1)
+BG = (0.035, 0.045, 0.065, 1)
+PANEL = (0.075, 0.095, 0.13, 1)
+PANEL_ALT = (0.11, 0.135, 0.18, 1)
+ACCENT = (0.40, 0.36, 1.0, 1)
+TEXT = (0.94, 0.96, 1.0, 1)
+MUTED = (0.62, 0.68, 0.78, 1)
+GREEN = (0.30, 0.83, 0.63, 1)
+RED = (1.0, 0.36, 0.42, 1)
+
 
 class Card(BoxLayout):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.padding = dp(12)
         self.spacing = dp(8)
-        self.background_color = PANEL
         with self.canvas.before:
             Color(*PANEL)
-            self.bg = RoundedRectangle(
-                pos=self.pos, size=self.size, radius=[dp(16)]
-            )
-        self.bind(pos=self.update_bg, size=self.update_bg)
+            self._bg = RoundedRectangle(pos=self.pos, size=self.size,
+                                        radius=[dp(16)])
+        self.bind(pos=self._sync_bg, size=self._sync_bg)
 
-    def update_bg(self, *_):
-        self.bg.pos = self.pos
-        self.bg.size = self.size
+    def _sync_bg(self, *_):
+        self._bg.pos = self.pos
+        self._bg.size = self.size
+
 
 class CouncilApp(App):
     def build(self):
         self.title = "AI Council"
         Window.clearcolor = BG
-
         self.cancel_event = threading.Event()
         self.busy = False
-        self.models = []
         self.catalog_loading = False
         self.catalog_error = ""
+        self.models = []
         self.history = []
         self.participants = []
         self.next_participant_id = 1
         self.pending_picker_callback = None
+        self._debate_thread = None
 
-        self.config_path = os.path.join(
-            self.user_data_dir, "council_config.json"
-        )
-        self.history_path = os.path.join(
-            self.user_data_dir, "council_history.json"
-        )
-
+        self.config_path = os.path.join(self.user_data_dir, "council_config.json")
+        self.history_path = os.path.join(self.user_data_dir, "council_history.json")
         self.load_config()
         self.load_history()
 
-        root = BoxLayout(
-            orientation="vertical",
-            padding=dp(12),
-            spacing=dp(10)
-        )
+        root = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(10))
 
-        header = BoxLayout(
-            size_hint_y=None, height=dp(58), spacing=dp(10)
-        )
-        title_box = BoxLayout(orientation="vertical", spacing=0)
-        title_box.add_widget(Label(
-            text="[b]AI COUNCIL[/b]",
-            markup=True, font_size="22sp",
-            color=TEXT, halign="left", valign="middle"
-        ))
-        title_box.add_widget(Label(
-            text="Совет искусственного интеллекта",
-            font_size="11sp", color=MUTED,
-            halign="left", valign="middle"
-        ))
-        header.add_widget(title_box)
-
-        history_btn = self.make_button("История", PANEL_ALT, width=dp(94))
+        header = BoxLayout(size_hint_y=None, height=dp(56), spacing=dp(8))
+        title_col = BoxLayout(orientation="vertical", spacing=0)
+        title_col.add_widget(Label(text="[b]AI COUNCIL[/b]", markup=True,
+                                   font_size="22sp", color=TEXT,
+                                   halign="left", valign="middle"))
+        title_col.add_widget(Label(text="Мульти-модельные дебаты",
+                                   font_size="11sp", color=MUTED,
+                                   halign="left", valign="middle"))
+        header.add_widget(title_col)
+        history_btn = self.make_button("История", PANEL_ALT, width=dp(92))
         history_btn.bind(on_release=self.show_history)
         header.add_widget(history_btn)
         root.add_widget(header)
 
-        main_scroll = ScrollView(do_scroll_x=False)
-        content = BoxLayout(
-            orientation="vertical",
-            size_hint_y=None, spacing=dp(12)
-        )
+        scroll = ScrollView(do_scroll_x=False, bar_width=dp(3))
+        content = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10))
         content.bind(minimum_height=content.setter("height"))
 
-        # API key
-        key_card = Card(
-            orientation="vertical",
-            size_hint_y=None, height=dp(144)
-        )
+        # API access
+        key_card = Card(orientation="vertical", size_hint_y=None, height=dp(142))
         key_card.add_widget(self.heading("Подключение OpenRouter"))
-
-        key_row = BoxLayout(
-            size_hint_y=None, height=dp(44), spacing=dp(6)
-        )
+        key_row = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
         self.key_input = TextInput(
-            hint_text="sk-or-v1-...",
-            password=True,
-            multiline=False,
-            text=self.api_key,
-            foreground_color=TEXT,
-            hint_text_color=MUTED,
-            background_color=PANEL_ALT,
-            cursor_color=ACCENT,
-            padding=[dp(10), dp(11)]
-        )
+            hint_text="API-ключ OpenRouter", password=True, multiline=False,
+            text=self.api_key, foreground_color=TEXT, hint_text_color=MUTED,
+            background_color=PANEL_ALT, cursor_color=ACCENT,
+            padding=[dp(10), dp(11)], write_tab=False)
         key_row.add_widget(self.key_input)
-
-        save_key_btn = self.make_button("Сохранить", ACCENT, width=dp(100))
-        save_key_btn.bind(on_release=self.save_key)
-        key_row.add_widget(save_key_btn)
+        save_btn = self.make_button("Сохранить", ACCENT, width=dp(100))
+        save_btn.bind(on_release=self.save_key)
+        key_row.add_widget(save_btn)
         key_card.add_widget(key_row)
-
         self.key_status = Label(
-            text="Ключ сохранён локально" if self.api_key else
-                 "Введи API-ключ для начала работы",
-            color=MUTED, font_size="11sp",
-            halign="left", size_hint_y=None, height=dp(20)
-        )
+            text="Ключ хранится в папке приложения" if self.api_key else "Добавь API-ключ, чтобы начать",
+            color=MUTED, font_size="11sp", halign="left",
+            size_hint_y=None, height=dp(18))
         key_card.add_widget(self.key_status)
         content.add_widget(key_card)
 
-        # Question and rounds
-        question_card = Card(
-            orientation="vertical",
-            size_hint_y=None, height=dp(196)
-        )
-        question_card.add_widget(self.heading("Новая дискуссия"))
-
+        # Topic and number of rounds
+        q_card = Card(orientation="vertical", size_hint_y=None, height=dp(228))
+        q_card.add_widget(self.heading("Тема дискуссии"))
         self.question = TextInput(
-            hint_text="О чём должны поспорить модели?",
-            multiline=True,
-            size_hint_y=None, height=dp(96),
-            foreground_color=TEXT,
-            hint_text_color=MUTED,
-            background_color=PANEL_ALT,
-            cursor_color=ACCENT,
-            padding=dp(10)
-        )
-        question_card.add_widget(self.question)
+            hint_text="Например: какая технология сильнее изменит образование?",
+            multiline=True, size_hint_y=None, height=dp(94),
+            foreground_color=TEXT, hint_text_color=MUTED,
+            background_color=PANEL_ALT, cursor_color=ACCENT,
+            padding=dp(10))
+        q_card.add_widget(self.question)
+        preset_row = BoxLayout(size_hint_y=None, height=dp(34), spacing=dp(6))
+        preset_btn = self.make_button("Вставить шаблон темы", PANEL_ALT)
+        preset_btn.bind(on_release=self.show_presets)
+        preset_row.add_widget(preset_btn)
+        q_card.add_widget(preset_row)
+        rr = BoxLayout(size_hint_y=None, height=dp(34), spacing=dp(8))
+        rr.add_widget(Label(text="Раунды", color=MUTED, size_hint_x=None,
+                            width=dp(60), halign="left"))
+        self.round_slider = Slider(min=1, max=MAX_ROUNDS, step=1,
+                                   value=self.rounds_value)
+        self.rounds_label = Label(text=str(self.rounds_value), color=TEXT,
+                                  size_hint_x=None, width=dp(24))
+        self.round_slider.bind(value=self.on_rounds_change)
+        rr.add_widget(self.round_slider)
+        rr.add_widget(self.rounds_label)
+        q_card.add_widget(rr)
+        content.add_widget(q_card)
 
-        rounds_row = BoxLayout(
-            size_hint_y=None, height=dp(36), spacing=dp(8)
-        )
-        rounds_row.add_widget(Label(
-            text="Раунды", color=MUTED,
-            size_hint_x=None, width=dp(70), halign="left"
-        ))
-        self.rounds_label = Label(
-            text=str(self.rounds_value),
-            color=TEXT, size_hint_x=None, width=dp(28)
-        )
-        self.round_slider = Slider(
-            min=1, max=MAX_ROUNDS, step=1,
-            value=self.rounds_value
-        )
-        self.round_slider.bind(
-            value=self.on_rounds_change
-        )
-        rounds_row.add_widget(self.round_slider)
-        rounds_row.add_widget(self.rounds_label)
-        question_card.add_widget(rounds_row)
-        content.add_widget(question_card)
-
-        # Protection toggles
-        safety_card = Card(
-            orientation="vertical",
-            size_hint_y=None, height=dp(186)
-        )
-        safety_card.add_widget(self.heading("Надёжность"))
-
-        self.retry_enabled = self.config.get("retry", True)
-        self.fallback_enabled = self.config.get("fallback", True)
-        self.continue_enabled = self.config.get("continue_on_error", True)
-
+        # Reliability options
+        opt_card = Card(orientation="vertical", size_hint_y=None, height=dp(176))
+        opt_card.add_widget(self.heading("Параметры надёжности"))
         self.retry_btn = self.make_button("", PANEL_ALT)
         self.fallback_btn = self.make_button("", PANEL_ALT)
         self.continue_btn = self.make_button("", PANEL_ALT)
-
         self.retry_btn.bind(on_release=lambda *_: self.toggle_setting("retry"))
         self.fallback_btn.bind(on_release=lambda *_: self.toggle_setting("fallback"))
         self.continue_btn.bind(on_release=lambda *_: self.toggle_setting("continue"))
-
-        safety_card.add_widget(self.retry_btn)
-        safety_card.add_widget(self.fallback_btn)
-        safety_card.add_widget(self.continue_btn)
+        opt_card.add_widget(self.retry_btn)
+        opt_card.add_widget(self.fallback_btn)
+        opt_card.add_widget(self.continue_btn)
         self.update_toggle_labels()
-        content.add_widget(safety_card)
+        content.add_widget(opt_card)
 
-        # Participants
-        people_card = Card(
-            orientation="vertical",
-            size_hint_y=None, height=dp(350)
-        )
-        people_card.bind(minimum_height=people_card.setter("height"))
-        people_card.add_widget(self.heading("Участники"))
-
-        self.people_list = BoxLayout(
-            orientation="vertical",
-            size_hint_y=None, spacing=dp(8)
-        )
-        self.people_list.bind(
-            minimum_height=self.people_list.setter("height")
-        )
-        people_card.add_widget(self.people_list)
-
-        people_controls = BoxLayout(
-            size_hint_y=None, height=dp(44), spacing=dp(8)
-        )
-        add_btn = self.make_button("+ Добавить ИИ", PANEL_ALT)
+        # Participants: card grows with the list instead of clipping extra rows.
+        self.people_card = Card(orientation="vertical", size_hint_y=None)
+        self.people_card.add_widget(self.heading("Участники"))
+        self.people_list = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(7))
+        self.people_list.bind(minimum_height=self.people_list.setter("height"))
+        self.people_card.add_widget(self.people_list)
+        people_actions = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(7))
+        add_btn = self.make_button("+ Добавить", PANEL_ALT)
         add_btn.bind(on_release=self.add_participant)
-        people_controls.add_widget(add_btn)
-
         catalog_btn = self.make_button("Каталог моделей", ACCENT)
         catalog_btn.bind(on_release=self.load_catalog)
-        people_controls.add_widget(catalog_btn)
-        people_card.add_widget(people_controls)
-        content.add_widget(people_card)
+        people_actions.add_widget(add_btn)
+        people_actions.add_widget(catalog_btn)
+        self.people_card.add_widget(people_actions)
+        self.people_card.bind(minimum_height=self.people_card.setter("height"))
+        content.add_widget(self.people_card)
 
         # Judge
-        judge_card = Card(
-            orientation="vertical",
-            size_hint_y=None, height=dp(100)
-        )
+        judge_card = Card(orientation="vertical", size_hint_y=None, height=dp(94))
         judge_card.add_widget(self.heading("Судья"))
-
-        self.judge_model = self.config.get("judge_model", "")
-        self.judge_btn = self.make_button(
-            self.judge_model or "Выбрать модель судьи",
-            PANEL_ALT
-        )
-        self.judge_btn.bind(
-            on_release=lambda *_: self.open_model_picker(
-                callback=self.set_judge
-            )
-        )
+        self.judge_btn = self.make_button(self.judge_model or "Выбрать модель судьи", PANEL_ALT)
+        self.judge_btn.bind(on_release=lambda *_: self.open_model_picker(callback=self.set_judge))
         judge_card.add_widget(self.judge_btn)
         content.add_widget(judge_card)
 
-        # Results
-        result_card = Card(
-            orientation="vertical",
-            size_hint_y=None, height=dp(310)
-        )
-        result_card.add_widget(self.heading("Ход дебатов"))
-
-        self.status = Label(
-            text="Готов к работе",
-            color=GREEN, size_hint_y=None,
-            height=dp(25), halign="left"
-        )
+        # Output
+        result_card = Card(orientation="vertical", size_hint_y=None, height=dp(360))
+        result_card.add_widget(self.heading("Дискуссия"))
+        result_tools = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(6))
+        export_btn = self.make_button("Экспорт TXT", PANEL_ALT)
+        export_btn.bind(on_release=self.export_latest)
+        compare_btn = self.make_button("Сравнить", PANEL_ALT)
+        compare_btn.bind(on_release=self.show_comparison)
+        result_tools.add_widget(export_btn)
+        result_tools.add_widget(compare_btn)
+        result_card.add_widget(result_tools)
+        self.status = Label(text="Готов к работе · OpenRouter", color=GREEN,
+                            size_hint_y=None, height=dp(24), halign="left")
         result_card.add_widget(self.status)
-
         self.output = Label(
-            text="Здесь появятся ответы участников и итог судьи.",
-            color=TEXT, font_size="13sp",
-            size_hint_y=None, halign="left", valign="top"
-        )
-        self.output.bind(
-            width=lambda obj, w: setattr(obj, "text_size", (w, None)),
-            texture_size=lambda obj, s: setattr(obj, "height", s[1])
-        )
-
-        output_scroll = ScrollView(do_scroll_x=False)
-        output_scroll.add_widget(self.output)
-        result_card.add_widget(output_scroll)
+            text="Здесь появятся ответы участников и заключение судьи.",
+            color=TEXT, font_size="13sp", size_hint_y=None,
+            halign="left", valign="top")
+        self.output.bind(width=self._output_width, texture_size=self._output_texture)
+        out_scroll = ScrollView(do_scroll_x=False, bar_width=dp(3))
+        out_scroll.add_widget(self.output)
+        result_card.add_widget(out_scroll)
         content.add_widget(result_card)
 
-        main_scroll.add_widget(content)
-        root.add_widget(main_scroll)
+        scroll.add_widget(content)
+        root.add_widget(scroll)
 
-        # Fixed bottom controls
-        bottom = BoxLayout(
-            size_hint_y=None, height=dp(52), spacing=dp(8)
-        )
+        bottom = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(8))
         self.run_btn = self.make_button("Начать дебаты", ACCENT)
         self.run_btn.bind(on_release=self.start_debate)
-        bottom.add_widget(self.run_btn)
-
         self.cancel_btn = self.make_button("Стоп", RED, width=dp(76))
         self.cancel_btn.disabled = True
         self.cancel_btn.bind(on_release=self.cancel_debate)
+        bottom.add_widget(self.run_btn)
         bottom.add_widget(self.cancel_btn)
         root.add_widget(bottom)
 
         self.refresh_participants()
         return root
 
+    def _output_width(self, widget, width):
+        widget.text_size = (max(1, width), None)
+
+    def _output_texture(self, widget, size):
+        widget.height = max(dp(40), size[1])
+
     def load_config(self):
         self.config = {}
         self.api_key = ""
         self.rounds_value = 3
-
+        self.retry_enabled = True
+        self.fallback_enabled = True
+        self.continue_enabled = True
+        self.judge_model = ""
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
-                self.config = json.load(f)
-            self.api_key = self.config.get("api_key", "")
-            self.rounds_value = max(
-                1, min(MAX_ROUNDS, int(self.config.get("rounds", 3)))
-            )
+                loaded = json.load(f)
+            self.config = loaded if isinstance(loaded, dict) else {}
         except (OSError, ValueError, TypeError):
-            pass
-
-        self.retry_enabled = self.config.get("retry", True)
-        self.fallback_enabled = self.config.get("fallback", True)
-        self.continue_enabled = self.config.get("continue_on_error", True)
-
+            self.config = {}
+        self.api_key = str(self.config.get("api_key", ""))
+        try:
+            self.rounds_value = max(1, min(MAX_ROUNDS, int(self.config.get("rounds", 3))))
+        except (ValueError, TypeError):
+            self.rounds_value = 3
+        self.retry_enabled = bool(self.config.get("retry", True))
+        self.fallback_enabled = bool(self.config.get("fallback", True))
+        self.continue_enabled = bool(self.config.get("continue_on_error", True))
+        self.judge_model = str(self.config.get("judge_model", ""))
         saved = self.config.get("participants", [])
-        for item in saved:
-            self.participants.append({
-                "uid": self.next_participant_id,
-                "model": item.get("model", ""),
-                "enabled": item.get("enabled", True)
-            })
-            self.next_participant_id += 1
-
+        if isinstance(saved, list):
+            for item in saved:
+                if isinstance(item, dict):
+                    self.participants.append({
+                        "uid": self.next_participant_id,
+                        "model": str(item.get("model", "")),
+                        "enabled": bool(item.get("enabled", True)),
+                        "role": str(item.get("role", "Эксперт"))
+                    })
+                    self.next_participant_id += 1
         if not self.participants:
             for _ in range(3):
-                self.participants.append({
-                    "uid": self.next_participant_id,
-                    "model": "",
-                    "enabled": True
-                })
+                self.participants.append({"uid": self.next_participant_id, "model": "", "enabled": True, "role": "Эксперт"})
                 self.next_participant_id += 1
 
     def save_config(self, *_):
         data = {
             "api_key": self.key_input.text.strip() if hasattr(self, "key_input") else self.api_key,
             "rounds": int(self.round_slider.value) if hasattr(self, "round_slider") else self.rounds_value,
-            "retry": self.retry_enabled,
-            "fallback": self.fallback_enabled,
+            "retry": self.retry_enabled, "fallback": self.fallback_enabled,
             "continue_on_error": self.continue_enabled,
             "judge_model": self.judge_model,
-            "participants": [
-                {"model": p["model"], "enabled": p["enabled"]}
-                for p in self.participants
-            ]
+            "participants": [{"model": p["model"], "enabled": p["enabled"], "role": p.get("role", "Эксперт")} for p in self.participants]
         }
-
         try:
             os.makedirs(self.user_data_dir, exist_ok=True)
             temp = self.config_path + ".tmp"
@@ -373,101 +290,79 @@ class CouncilApp(App):
             self.config = data
             self.api_key = data["api_key"]
             return True
-        except OSError:
+        except (OSError, TypeError, ValueError):
             return False
 
     def save_key(self, *_):
         self.api_key = self.key_input.text.strip()
         if self.save_config():
-            self.key_status.text = "Ключ сохранён"
-            self.show_notice("Настройки", "API-ключ сохранён в приватной папке приложения.")
+            self.key_status.text = "Ключ сохранён локально"
+            self.show_notice("Готово", "Ключ сохранён в приватной папке приложения.")
         else:
-            self.key_status.text = "Не удалось сохранить ключ"
+            self.key_status.text = "Не удалось сохранить настройки"
+            self.show_notice("Ошибка", "Не удалось сохранить настройки приложения.")
 
     def load_history(self):
         try:
             with open(self.history_path, "r", encoding="utf-8") as f:
-                self.history = json.load(f)
-            if not isinstance(self.history, list):
-                self.history = []
+                data = json.load(f)
+            self.history = data[:MAX_HISTORY] if isinstance(data, list) else []
         except (OSError, ValueError, TypeError):
             self.history = []
 
     def save_history(self, entry):
         self.history.insert(0, entry)
-        self.history = self.history[:100]
+        self.history = self.history[:MAX_HISTORY]
         try:
+            os.makedirs(self.user_data_dir, exist_ok=True)
             temp = self.history_path + ".tmp"
             with open(temp, "w", encoding="utf-8") as f:
                 json.dump(self.history, f, ensure_ascii=False, indent=2)
             os.replace(temp, self.history_path)
         except OSError:
-            self.publish("Не удалось сохранить историю на устройстве.")
+            self.publish("Предупреждение: не удалось сохранить историю на устройстве.")
 
     def make_button(self, text, color, width=None):
-        btn = Button(
-            text=text,
-            size_hint_x=None if width else 1,
-            width=width or 0,
-            size_hint_y=None,
-            height=dp(42),
-            background_normal="",
-            background_down="",
-            background_color=color,
-            color=TEXT,
-            font_size="12sp"
-        )
-        return btn
+        return Button(text=text, size_hint_x=None if width else 1,
+                      width=width or 0, size_hint_y=None, height=dp(42),
+                      background_normal="", background_down="",
+                      background_color=color, color=TEXT, font_size="12sp")
 
     def heading(self, text):
-        return Label(
-            text=f"[b]{text}[/b]",
-            markup=True, color=TEXT,
-            font_size="15sp", halign="left",
-            size_hint_y=None, height=dp(26)
-        )
+        return Label(text=f"[b]{text}[/b]", markup=True, color=TEXT,
+                     font_size="15sp", halign="left",
+                     size_hint_y=None, height=dp(26))
 
     def on_rounds_change(self, _slider, value):
         self.rounds_value = int(value)
-        self.rounds_label.text = str(self.rounds_value)
-        if hasattr(self, "config"):
+        if hasattr(self, "rounds_label"):
+            self.rounds_label.text = str(self.rounds_value)
+        if hasattr(self, "config_path") and hasattr(self, "key_input"):
             self.save_config()
 
     def toggle_setting(self, setting):
+        if self.busy:
+            return
         if setting == "retry":
             self.retry_enabled = not self.retry_enabled
         elif setting == "fallback":
             self.fallback_enabled = not self.fallback_enabled
         else:
             self.continue_enabled = not self.continue_enabled
-
         self.update_toggle_labels()
         self.save_config()
 
     def update_toggle_labels(self):
         if not hasattr(self, "retry_btn"):
             return
-        self.retry_btn.text = (
-            "Повтор запросов: ВКЛ" if self.retry_enabled
-            else "Повтор запросов: ВЫКЛ"
-        )
-        self.fallback_btn.text = (
-            "Резервные модели: ВКЛ" if self.fallback_enabled
-            else "Резервные модели: ВЫКЛ"
-        )
-        self.continue_btn.text = (
-            "Продолжать при ошибках: ВКЛ" if self.continue_enabled
-            else "Продолжать при ошибках: ВЫКЛ"
-        )
+        self.retry_btn.text = "Повтор запросов: " + ("ВКЛ" if self.retry_enabled else "ВЫКЛ")
+        self.fallback_btn.text = "Бесплатный резерв: " + ("ВКЛ" if self.fallback_enabled else "ВЫКЛ")
+        self.continue_btn.text = "Продолжать при ошибке: " + ("ВКЛ" if self.continue_enabled else "ВЫКЛ")
 
     def add_participant(self, *_):
         if self.busy:
             return
-        self.participants.append({
-            "uid": self.next_participant_id,
-            "model": "",
-            "enabled": True
-        })
+        self.participants.append({"uid": self.next_participant_id, "model": "", "enabled": True, "role": "Эксперт"})
         self.next_participant_id += 1
         self.refresh_participants()
         self.save_config()
@@ -475,70 +370,9 @@ class CouncilApp(App):
     def remove_participant(self, uid):
         if self.busy:
             return
-        self.participants = [
-            p for p in self.participants if p["uid"] != uid
-        ]
+        self.participants = [p for p in self.participants if p["uid"] != uid]
         self.refresh_participants()
         self.save_config()
-
-    def refresh_participants(self):
-        if not hasattr(self, "people_list"):
-            return
-
-        self.people_list.clear_widgets()
-
-        for p in self.participants:
-            row = Card(
-                orientation="horizontal",
-                size_hint_y=None, height=dp(74)
-            )
-
-            details = BoxLayout(orientation="vertical", spacing=dp(3))
-            model_name = p["model"] or "Модель не выбрана"
-            details.add_widget(Label(
-                text=model_name,
-                color=TEXT, halign="left", valign="middle",
-                font_size="12sp", shorten=True,
-                shorten_from="right"
-            ))
-            details.add_widget(Label(
-                text="Участник включён" if p["enabled"] else "Выключен",
-                color=GREEN if p["enabled"] else MUTED,
-                font_size="10sp", halign="left"
-            ))
-            row.add_widget(details)
-
-            choose = self.make_button("Выбрать", ACCENT, width=dp(76))
-            choose.bind(
-                on_release=lambda _btn, uid=p["uid"]:
-                self.open_model_picker(
-                    callback=lambda model: self.set_participant_model(uid, model)
-                )
-            )
-            row.add_widget(choose)
-
-            toggle = self.make_button(
-                "Вкл." if p["enabled"] else "Выкл.",
-                PANEL_ALT, width=dp(56)
-            )
-            toggle.bind(
-                on_release=lambda _btn, uid=p["uid"]:
-                self.toggle_participant(uid)
-            )
-            row.add_widget(toggle)
-
-            remove = self.make_button("×", RED, width=dp(38))
-            remove.bind(
-                on_release=lambda _btn, uid=p["uid"]:
-                self.remove_participant(uid)
-            )
-            row.add_widget(remove)
-
-            self.people_list.add_widget(row)
-
-        self.people_list.height = sum(
-            dp(82) for _ in self.participants
-        )
 
     def toggle_participant(self, uid):
         if self.busy:
@@ -549,6 +383,34 @@ class CouncilApp(App):
         self.refresh_participants()
         self.save_config()
 
+    def refresh_participants(self):
+        if not hasattr(self, "people_list"):
+            return
+        self.people_list.clear_widgets()
+        for p in self.participants:
+            row = Card(orientation="horizontal", size_hint_y=None, height=dp(70), padding=dp(8), spacing=dp(5))
+            details = BoxLayout(orientation="vertical", spacing=dp(2))
+            details.add_widget(Label(text=p["model"] or "Модель не выбрана",
+                                     color=TEXT, halign="left", valign="middle",
+                                     font_size="11sp", shorten=True, shorten_from="right"))
+            details.add_widget(Label(text=(p.get("role", "Эксперт") + " · " + ("Включён" if p["enabled"] else "Отключён")),
+                                     color=GREEN if p["enabled"] else MUTED,
+                                     font_size="10sp", halign="left"))
+            row.add_widget(details)
+            choose = self.make_button("Выбрать", ACCENT, width=dp(72))
+            choose.bind(on_release=lambda _b, uid=p["uid"]: self.open_model_picker(
+                callback=lambda model: self.set_participant_model(uid, model)))
+            row.add_widget(choose)
+            toggle = self.make_button("Вкл" if p["enabled"] else "Выкл", PANEL_ALT, width=dp(48))
+            toggle.bind(on_release=lambda _b, uid=p["uid"]: self.toggle_participant(uid))
+            row.add_widget(toggle)
+            remove = self.make_button("×", RED, width=dp(34))
+            remove.bind(on_release=lambda _b, uid=p["uid"]: self.remove_participant(uid))
+            row.add_widget(remove)
+            self.people_list.add_widget(row)
+        self.people_list.height = sum(dp(77) for _ in self.participants)
+        self.people_card.height = dp(26 + 12 + 8 + 42 + 8) + self.people_list.height
+
     def set_participant_model(self, uid, model):
         for p in self.participants:
             if p["uid"] == uid:
@@ -558,163 +420,110 @@ class CouncilApp(App):
 
     def set_judge(self, model):
         self.judge_model = model["id"]
-        self.judge_btn.text = model["id"]
+        self.judge_btn.text = self.judge_model
         self.save_config()
 
     def load_catalog(self, *_):
-        if self.catalog_loading:
+        if self.catalog_loading or self.busy:
             return
-
         self.catalog_loading = True
-        self.status.text = "Загружаю каталог OpenRouter..."
+        self.status.text = "Загружаю каталог моделей…"
         self.run_btn.disabled = True
-
-        threading.Thread(
-            target=self._fetch_catalog, daemon=True
-        ).start()
+        threading.Thread(target=self._fetch_catalog, daemon=True).start()
 
     def _fetch_catalog(self):
         try:
-            response = requests.get(
-                API_ROOT + "/models",
-                timeout=REQUEST_TIMEOUT
-            )
+            response = requests.get(API_ROOT + "/models", timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             data = response.json().get("data", [])
-            self.models = [
-                m for m in data
-                if isinstance(m, dict) and m.get("id")
-            ]
-            self.models.sort(
-                key=lambda m: m.get("name", m["id"]).lower()
-            )
+            models = [m for m in data if isinstance(m, dict) and m.get("id")]
+            models.sort(key=lambda m: str(m.get("name", m["id"])).lower())
+            self.models = models
             self.catalog_error = ""
-            Clock.schedule_once(
-                lambda _dt: self._catalog_loaded()
-            )
+            Clock.schedule_once(lambda _dt: self._catalog_loaded())
         except Exception as exc:
-            self.catalog_error = type(exc).__name__
-            Clock.schedule_once(
-                lambda _dt: self._catalog_failed()
-            )
+            self.catalog_error = f"{type(exc).__name__}: {str(exc)[:160]}"
+            Clock.schedule_once(lambda _dt: self._catalog_failed())
 
     def _catalog_loaded(self):
         self.catalog_loading = False
         self.run_btn.disabled = self.busy
-        self.status.text = f"Загружено моделей: {len(self.models)}"
-
+        self.status.text = f"Каталог загружен: {len(self.models)} моделей"
         callback = self.pending_picker_callback
         self.pending_picker_callback = None
-        self.open_model_picker(callback=callback)
+        if callback is not None:
+            self.open_model_picker(callback=callback)
 
     def _catalog_failed(self):
         self.catalog_loading = False
         self.run_btn.disabled = self.busy
-        self.status.text = "Ошибка загрузки каталога"
-        self.show_notice(
-            "Ошибка каталога",
-            "Не удалось загрузить модели. Проверь интернет-соединение. "
-            "Техническая ошибка: " + self.catalog_error
-        )
+        self.status.text = "Каталог недоступен"
+        self.show_notice("Не удалось загрузить каталог",
+                         "Проверь интернет-соединение и повтори попытку.\n\n" + self.catalog_error)
 
     def open_model_picker(self, callback=None, *_):
         if not self.models:
             self.pending_picker_callback = callback
             self.load_catalog()
             return
-
-        popup_box = BoxLayout(
-            orientation="vertical", padding=dp(12), spacing=dp(8)
-        )
-        search = TextInput(
-            hint_text="Поиск модели...",
-            multiline=False, size_hint_y=None, height=dp(44),
-            foreground_color=TEXT, background_color=PANEL_ALT
-        )
-
-        filter_row = BoxLayout(
-            size_hint_y=None, height=dp(40), spacing=dp(6)
-        )
+        box = BoxLayout(orientation="vertical", padding=dp(10), spacing=dp(8))
+        search = TextInput(hint_text="Поиск по названию или ID…", multiline=False,
+                           size_hint_y=None, height=dp(42), foreground_color=TEXT,
+                           hint_text_color=MUTED, background_color=PANEL_ALT)
+        free_row = BoxLayout(size_hint_y=None, height=dp(38))
         free_only = {"value": False}
-        free_btn = self.make_button("Все модели", PANEL_ALT)
-        filter_row.add_widget(free_btn)
-        popup_box.add_widget(search)
-        popup_box.add_widget(filter_row)
-
-        results = GridLayout(
-            cols=1, spacing=dp(6), size_hint_y=None
-        )
+        free_btn = self.make_button("Показать только бесплатные", PANEL_ALT)
+        free_row.add_widget(free_btn)
+        box.add_widget(search)
+        box.add_widget(free_row)
+        results = GridLayout(cols=1, spacing=dp(5), size_hint_y=None)
         results.bind(minimum_height=results.setter("height"))
-        scroll = ScrollView()
-        scroll.add_widget(results)
-        popup_box.add_widget(scroll)
+        list_scroll = ScrollView(do_scroll_x=False)
+        list_scroll.add_widget(results)
+        box.add_widget(list_scroll)
+        popup = Popup(title="Выбрать модель", content=box, size_hint=(0.95, 0.88), auto_dismiss=True)
 
-        popup = Popup(
-            title="Каталог моделей OpenRouter",
-            content=popup_box,
-            size_hint=(0.95, 0.88)
-        )
-
-        def price_is_free(model):
+        def is_free(model):
             pricing = model.get("pricing", {})
             try:
-                return (
-                    float(pricing.get("prompt", -1)) == 0
-                    and float(pricing.get("completion", -1)) == 0
-                )
-            except (ValueError, TypeError):
+                return float(pricing.get("prompt", -1)) == 0 and float(pricing.get("completion", -1)) == 0
+            except (TypeError, ValueError):
                 return False
-
-        def render(*_):
-            results.clear_widgets()
-            query = search.text.lower().strip()
-            candidates = []
-
-            for model in self.models:
-                name = model.get("name", "")
-                model_id = model.get("id", "")
-                if query and query not in name.lower() and query not in model_id.lower():
-                    continue
-                if free_only["value"] and not price_is_free(model):
-                    continue
-                candidates.append(model)
-
-            if not candidates:
-                results.add_widget(Label(
-                    text="Модели не найдены",
-                    size_hint_y=None, height=dp(45), color=MUTED
-                ))
-
-            for model in candidates[:250]:
-                name = model.get("name", model["id"])
-                model_id = model["id"]
-                tag = "FREE" if price_is_free(model) else "Платная"
-                btn = Button(
-                    text=f"{name}\n{model_id}  ·  {tag}",
-                    size_hint_y=None, height=dp(64),
-                    halign="left", valign="middle",
-                    text_size=(Window.width * 0.78, None),
-                    background_normal="",
-                    background_color=PANEL_ALT,
-                    color=TEXT, font_size="11sp"
-                )
-                btn.bind(
-                    on_release=lambda _btn, m=model:
-                    select_model(m)
-                )
-                results.add_widget(btn)
 
         def select_model(model):
             if callback:
                 callback(model)
             popup.dismiss()
 
+        def render(*_):
+            results.clear_widgets()
+            query = search.text.lower().strip()
+            filtered = []
+            for model in self.models:
+                mid = str(model.get("id", ""))
+                name = str(model.get("name", mid))
+                if query and query not in mid.lower() and query not in name.lower():
+                    continue
+                if free_only["value"] and not is_free(model):
+                    continue
+                filtered.append(model)
+            if not filtered:
+                results.add_widget(Label(text="Ничего не найдено", color=MUTED, size_hint_y=None, height=dp(42)))
+            for model in filtered[:180]:
+                mid = model["id"]
+                name = model.get("name", mid)
+                price_tag = "БЕСПЛАТНО" if is_free(model) else "ПЛАТНАЯ"
+                btn = Button(text=f"{name}\n{mid}  ·  {price_tag}", size_hint_y=None,
+                             height=dp(62), halign="left", valign="middle",
+                             text_size=(Window.width * 0.78, None),
+                             background_normal="", background_color=PANEL_ALT,
+                             color=TEXT, font_size="11sp")
+                btn.bind(on_release=lambda _b, m=model: select_model(m))
+                results.add_widget(btn)
+
         def toggle_free(*_):
             free_only["value"] = not free_only["value"]
-            free_btn.text = (
-                "Только бесплатные" if free_only["value"]
-                else "Все модели"
-            )
+            free_btn.text = "Показать все модели" if free_only["value"] else "Показать только бесплатные"
             render()
 
         free_btn.bind(on_release=toggle_free)
@@ -725,354 +534,203 @@ class CouncilApp(App):
     def start_debate(self, *_):
         if self.busy:
             return
-
         key = self.key_input.text.strip()
         question = self.question.text.strip()
-
         if not key:
-            self.show_notice("Нет API-ключа", "Введи и сохрани ключ OpenRouter.")
+            self.show_notice("Нужен API-ключ", "Введи ключ OpenRouter и нажми «Сохранить».")
             return
         if not question:
-            self.show_notice("Нет вопроса", "Напиши вопрос для дебатов.")
+            self.show_notice("Нет темы", "Напиши вопрос или тему для обсуждения.")
             return
-
-        active = [
-            p.copy() for p in self.participants
-            if p["enabled"] and p["model"]
-        ]
+        active = [p.copy() for p in self.participants if p["enabled"] and p["model"]]
         if len(active) < 2:
-            self.show_notice(
-                "Мало участников",
-                "Выбери модели минимум для двух включённых участников."
-            )
+            self.show_notice("Мало участников", "Выбери минимум две включённые модели.")
             return
-
-        judge = self.judge_model or active[0]["model"]
+        if not self.judge_model:
+            self.judge_model = active[0]["model"]
+            self.judge_btn.text = self.judge_model
         self.save_config()
         self.cancel_event.clear()
         self.busy = True
         self.run_btn.disabled = True
         self.cancel_btn.disabled = False
-        self.output.text = "Запускаю дебаты..."
-        self.status.text = "Участники готовятся"
-
+        self.output.text = "Подключаю участников…"
+        self.status.text = "Дебаты выполняются"
         settings = {
-            "key": key,
-            "question": question,
-            "rounds": int(self.round_slider.value),
-            "participants": active,
-            "judge": judge,
-            "retry": self.retry_enabled,
-            "fallback": self.fallback_enabled,
-            "continue_on_error": self.continue_enabled,
-            "models": list(self.models)
+            "key": key, "question": question, "rounds": int(self.round_slider.value),
+            "participants": active, "judge": self.judge_model,
+            "retry": self.retry_enabled, "fallback": self.fallback_enabled,
+            "continue_on_error": self.continue_enabled, "models": list(self.models)
         }
-
-        threading.Thread(
-            target=self.run_debate,
-            args=(settings,),
-            daemon=True
-        ).start()
+        self._debate_thread = threading.Thread(target=self.run_debate, args=(settings,), daemon=True)
+        self._debate_thread.start()
 
     def request_model(self, key, model_id, prompt):
-        headers = {
-            "Authorization": "Bearer " + key,
-            "Content-Type": "application/json",
-            "X-Title": "AI Council"
-        }
-        payload = {
-            "model": model_id,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.6,
-            "max_tokens": 3000
-        }
-
-        response = requests.post(
-            API_ROOT + "/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=REQUEST_TIMEOUT
-        )
-
+        headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json",
+                   "X-Title": "AI Council"}
+        payload = {"model": model_id, "messages": [{"role": "user", "content": prompt}],
+                   "temperature": 0.6, "max_tokens": 2500}
+        response = requests.post(API_ROOT + "/chat/completions", headers=headers,
+                                 json=payload, timeout=REQUEST_TIMEOUT)
         if response.status_code != 200:
-            message = ""
             try:
-                message = response.json().get("error", {}).get("message", "")
+                error_data = response.json().get("error", {})
+                message = error_data.get("message", "")
             except (ValueError, AttributeError):
-                pass
-            raise RuntimeError(
-                f"HTTP {response.status_code}: {message[:180]}"
-            )
-
+                message = response.text[:160]
+            raise RuntimeError(f"HTTP {response.status_code}: {str(message)[:180]}")
         data = response.json()
-        content = data["choices"][0]["message"]["content"]
-
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            raise RuntimeError("OpenRouter вернул ответ неожиданного формата")
         if isinstance(content, list):
-            content = "\n".join(
-                part.get("text", "")
-                for part in content
-                if isinstance(part, dict)
-            )
-
+            content = "\n".join(part.get("text", "") for part in content if isinstance(part, dict))
         if not isinstance(content, str) or not content.strip():
             raise RuntimeError("Модель вернула пустой ответ")
-
         return content.strip()
 
     def ask_safely(self, settings, model_id, prompt):
         candidates = [model_id]
-        errors = []
-
         if settings["fallback"]:
-            free_models = []
             for model in settings["models"]:
                 pricing = model.get("pricing", {})
                 try:
-                    free = (
-                        float(pricing.get("prompt", -1)) == 0
-                        and float(pricing.get("completion", -1)) == 0
-                    )
+                    free = float(pricing.get("prompt", -1)) == 0 and float(pricing.get("completion", -1)) == 0
                 except (TypeError, ValueError):
                     free = False
-
                 mid = model.get("id", "")
-                if free and mid and mid != model_id:
-                    free_models.append(mid)
-
-            candidates.extend(free_models[:3])
-
+                if free and mid and mid not in candidates:
+                    candidates.append(mid)
+                if len(candidates) >= 4:
+                    break
+        errors = []
         for candidate in candidates:
-            attempts = MAX_RETRIES + 1 if settings["retry"] else 1
-
+            attempts = 3 if settings["retry"] else 1
             for attempt in range(attempts):
                 if self.cancel_event.is_set():
-                    return None, candidate, "Отменено"
-
+                    return None, candidate, "Остановлено пользователем"
                 try:
-                    answer = self.request_model(
-                        settings["key"], candidate, prompt
-                    )
-                    return answer, candidate, None
-
+                    return self.request_model(settings["key"], candidate, prompt), candidate, None
                 except requests.RequestException as exc:
-                    error = type(exc).__name__
-                    errors.append(f"{candidate}: {error}")
+                    errors.append(f"{candidate}: {type(exc).__name__}")
                     if attempt + 1 < attempts:
-                        time.sleep(min(2 ** attempt, 4))
+                        self.cancel_event.wait(min(2 ** attempt, 4))
                         continue
                     break
-
                 except RuntimeError as exc:
                     error = str(exc)
                     errors.append(f"{candidate}: {error}")
-
-                    transient = any(
-                        code in error
-                        for code in ("HTTP 429", "HTTP 500",
-                                     "HTTP 502", "HTTP 503", "HTTP 504")
-                    )
+                    transient = any(code in error for code in ("HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504"))
                     if transient and attempt + 1 < attempts:
-                        time.sleep(min(2 ** attempt, 4))
+                        self.cancel_event.wait(min(2 ** attempt, 4))
                         continue
                     break
-
                 except (ValueError, KeyError, IndexError, TypeError):
-                    errors.append(f"{candidate}: некорректный ответ")
+                    errors.append(f"{candidate}: неверный формат ответа")
                     break
-
         return None, model_id, "; ".join(errors[-4:]) or "Нет ответа"
 
     def run_debate(self, settings):
         question = settings["question"]
-        rounds = settings["rounds"]
-        participants = settings["participants"]
-        transcript = []
-        successful = []
-
+        transcript, successful = [], []
+        final_answer = ""
         try:
-            for round_number in range(1, rounds + 1):
+            for round_no in range(1, settings["rounds"] + 1):
                 if self.cancel_event.is_set():
                     break
-
-                self.publish(
-                    f"Раунд {round_number}/{rounds}\n"
-                    "Участники формируют ответы..."
-                )
-
-                if round_number == 1:
-                    prompt = (
-                        "Ты участник интеллектуальных дебатов. "
-                        "Ответь самостоятельно, приводи обоснования и "
-                        "отмечай неопределённость.\n\nВопрос: " + question
-                    )
+                self.publish(f"Раунд {round_no}/{settings['rounds']} — собираю ответы…")
+                if round_no == 1:
+                    prompt = ("Ты участник интеллектуальных дебатов. Ответь самостоятельно, "
+                              "обоснуй позицию и отметь неопределённость.\n\nВопрос: " + question)
                 else:
-                    previous = "\n\n".join(
-                        f"{item['name']}:\n{item['answer']}"
-                        for item in successful
-                    )
-                    prompt = (
-                        f"Исходный вопрос: {question}\n"
-                        f"Раунд: {round_number}\n\n"
-                        f"Предыдущие ответы:\n{previous}\n\n"
-                        "Критически проанализируй аргументы других "
-                        "участников. Исправь собственные ошибки, укажи "
-                        "сильные и слабые места и дай улучшенный ответ. "
-                        "Не соглашайся автоматически."
-                    )
-
+                    recent = successful[-min(12, len(successful)):]
+                    previous = "\n\n".join(f"{x['name']}:\n{x['answer'][:3500]}" for x in recent)
+                    prompt = ("Учитывай свою назначенную роль и анализируй вопрос с её перспективы. "
+                              f"Исходный вопрос: {question}\nРаунд: {round_no}\n\n"
+                              f"Предыдущие ответы:\n{previous}\n\n"
+                              "Критически оцени аргументы других участников, исправь свои ошибки, "
+                              "укажи сильные и слабые стороны и дай улучшенный ответ. Не соглашайся автоматически.")
                 round_items = []
-
-                with ThreadPoolExecutor(
-                    max_workers=min(5, len(participants))
-                ) as executor:
-                    future_map = {
-                        executor.submit(
-                            self.ask_safely, settings,
-                            p["model"], prompt
-                        ): p
-                        for p in participants
-                    }
-
+                with ThreadPoolExecutor(max_workers=min(5, len(settings["participants"]))) as pool:
+                    future_map = {}
+                    for p in settings["participants"]:
+                        role_prompt = (f"Твоя роль в совете: {p.get('role', 'Эксперт')}. "
+                                       "Рассматривай вопрос с этой перспективы.\n\n" + prompt)
+                        future_map[pool.submit(self.ask_safely, settings, p["model"], role_prompt)] = p
                     for future in as_completed(future_map):
-                        if self.cancel_event.is_set():
-                            break
-
                         participant = future_map[future]
                         try:
                             answer, used_model, error = future.result()
                         except Exception as exc:
-                            answer, used_model, error = (
-                                None, participant["model"],
-                                type(exc).__name__
-                            )
-
-                        name = participant["model"]
-
+                            answer, used_model, error = None, participant["model"], type(exc).__name__
                         if answer:
-                            item = {
-                                "round": round_number,
-                                "name": name,
-                                "used_model": used_model,
-                                "answer": answer
-                            }
+                            item = {"round": round_no, "name": participant["model"],
+                                    "used_model": used_model, "answer": answer,
+                                    "estimated_cost_usd": self.estimate_cost(settings, used_model, prompt, answer)}
                             round_items.append(item)
                             successful.append(item)
-                            self.publish(
-                                f"Раунд {round_number}/{rounds}\n"
-                                f"Получен ответ: {name}\n\n" + answer
-                            )
+                            self.publish(f"Раунд {round_no}/{settings['rounds']}\n"
+                                         f"Ответ получен: {participant['model']}\n\n{answer}")
                         else:
-                            round_items.append({
-                                "round": round_number,
-                                "name": name,
-                                "error": error
-                            })
-                            self.publish(
-                                f"Раунд {round_number}/{rounds}\n"
-                                f"{name}: ошибка\n{error}"
-                            )
-
+                            round_items.append({"round": round_no, "name": participant["model"], "error": error})
+                            self.publish(f"{participant['model']}: {error}")
                 transcript.extend(round_items)
-
-                if not any("answer" in item for item in round_items):
-                    if not settings["continue_on_error"]:
-                        break
-
-                if not settings["continue_on_error"] and any(
-                    "error" in item for item in round_items
-                ):
+                if self.cancel_event.is_set():
+                    break
+                if not settings["continue_on_error"] and any("error" in x for x in round_items):
+                    break
+                if not any("answer" in x for x in round_items):
                     break
 
             if self.cancel_event.is_set():
-                final_answer = "Дебаты остановлены пользователем."
+                final_answer = "Дебаты остановлены. Ниже сохранены полученные ответы."
             elif not successful:
-                final_answer = (
-                    "Ни один участник не ответил. Проверь ключ, "
-                    "доступность моделей и лимиты OpenRouter."
-                )
+                final_answer = "Участники не ответили. Проверь API-ключ, баланс/лимиты и доступность моделей."
             else:
                 judge_prompt = (
                     "Ты независимый судья интеллектуальных дебатов.\n"
-                    f"Вопрос: {question}\n\n"
-                    "Оцени ответы, выдели сильные аргументы, разногласия "
-                    "и ошибки. Не придумывай факты. Если участник не "
-                    "ответил, не считай это доказательством проигрыша.\n"
-                    "Сформулируй обоснованный итог.\n\n"
-                    + "\n\n".join(
-                        f"Раунд {item['round']} — {item['name']}:\n"
-                        f"{item['answer']}"
-                        for item in successful
-                    )
+                    f"Вопрос: {question}\n\nОцени качество аргументов, выдели согласия, разногласия, "
+                    "сильные стороны и возможные ошибки. Не придумывай факты. Не считай отсутствие "
+                    "ответа доказательством проигрыша. Заверши обоснованным выводом.\n\n"
+                    + "\n\n".join(f"Раунд {x['round']} — {x['name']}:\n{x['answer'][:4000]}" for x in successful[-15:])
                 )
-
-                self.publish("Судья формирует итог...")
-                judge_answer, actual_judge, judge_error = self.ask_safely(
-                    settings, settings["judge"], judge_prompt
-                )
-
-                transcript_text = "\n\n".join(
-                    f"Раунд {item['round']} — {item['name']}\n{item['answer']}"
-                    if "answer" in item
-                    else (
-                        f"Раунд {item.get('round')} — {item.get('name')}\n"
-                        f"Ошибка: {item.get('error')}"
-                    )
-                    for item in transcript
-                )
-
+                self.publish("Судья анализирует результаты…")
+                judge_answer, actual_judge, judge_error = self.ask_safely(settings, settings["judge"], judge_prompt)
                 if judge_answer:
-                    final_answer = (
-                        "=== ОТВЕТЫ УЧАСТНИКОВ ===\n\n"
-                        + transcript_text
-                        + "\n\n=== ИТОГ СУДЬИ ===\n\n"
-                        + f"Модель: {actual_judge}\n\n"
-                        + judge_answer
-                    )
+                    total_cost = sum(x.get("estimated_cost_usd", 0) or 0 for x in successful)
+                    final_answer = (f"ИТОГ СУДЬИ · {actual_judge}\n\n{judge_answer}\n\n"
+                                    f"Оценочная стоимость известных моделей: ~${total_cost:.6f} USD "
+                                    "(оценка по длине текста, не счёт OpenRouter).\n\n"
+                                    + self.format_transcript(transcript))
                 else:
-                    final_answer = (
-                        "=== ОТВЕТЫ УЧАСТНИКОВ ===\n\n"
-                        + transcript_text
-                        + "\n\n=== ИТОГ СУДЬИ (ОШИБКА) ===\n\n"
-                        "Не удалось получить итог судьи.\n"
-                        f"Причина: {judge_error}\n\n"
-                        "Ответы участников сохранены в истории."
-                    )
+                    final_answer = f"Не удалось получить итог судьи: {judge_error}\n\n" + self.format_transcript(transcript)
 
-            entry = {
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "question": question,
-                "rounds": rounds,
-                "judge": settings["judge"],
-                "transcript": transcript,
-                "final": final_answer
-            }
-
-            if self.config.get("save_history", True):
-                Clock.schedule_once(
-                    lambda _dt, item=entry: self.save_history(item)
-                )
-
-            self.publish(final_answer)
-            Clock.schedule_once(
-                lambda _dt, text=final_answer:
-                self.finish_debate(text)
-            )
-
+            entry = {"timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                     "question": question, "rounds": settings["rounds"],
+                     "judge": settings["judge"], "transcript": transcript, "final": final_answer}
+            Clock.schedule_once(lambda _dt, e=entry: self.save_history(e))
+            Clock.schedule_once(lambda _dt, result=final_answer: self.finish_debate(result))
         except Exception as exc:
-            self.publish(
-                "Ошибка во время дебатов: " + type(exc).__name__
-            )
+            self.publish("Ошибка во время дебатов: " + type(exc).__name__ + ": " + str(exc)[:180])
             Clock.schedule_once(lambda _dt: self.finish_ui())
 
+    def format_transcript(self, transcript):
+        parts = ["\n\n──── ОТВЕТЫ УЧАСТНИКОВ ────"]
+        for item in transcript:
+            heading = f"\nРаунд {item.get('round', '?')} · {item.get('name', 'Модель')}"
+            if "answer" in item:
+                parts.append(heading + "\n" + item["answer"])
+            else:
+                parts.append(heading + "\nОшибка: " + str(item.get("error", "нет ответа")))
+        return "\n".join(parts)
+
     def publish(self, text):
-        Clock.schedule_once(
-            lambda _dt, value=str(text):
-            setattr(self.output, "text", value)
-        )
+        Clock.schedule_once(lambda _dt, value=str(text): setattr(self.output, "text", value))
 
     def finish_debate(self, text):
         self.output.text = text
-        self.status.text = "Дебаты завершены"
+        self.status.text = "Дебаты завершены" if not self.cancel_event.is_set() else "Остановлено"
         self.finish_ui()
 
     def finish_ui(self):
@@ -1081,72 +739,36 @@ class CouncilApp(App):
         self.cancel_btn.disabled = True
 
     def cancel_debate(self, *_):
-        self.cancel_event.set()
-        self.status.text = "Останавливаю дебаты..."
+        if self.busy:
+            self.cancel_event.set()
+            self.status.text = "Останавливаю… текущий HTTP-запрос может завершиться не сразу."
 
     def show_history(self, *_):
         if not self.history:
-            self.show_notice("История", "Сохранённых дебатов пока нет.")
+            self.show_notice("История", "Сохранённых дискуссий пока нет.")
             return
-
-        box = BoxLayout(
-            orientation="vertical", padding=dp(10), spacing=dp(8)
-        )
-        scroll = ScrollView()
-        items = GridLayout(
-            cols=1, spacing=dp(6), size_hint_y=None
-        )
+        box = BoxLayout(orientation="vertical", padding=dp(10), spacing=dp(8))
+        scroll = ScrollView(do_scroll_x=False)
+        items = GridLayout(cols=1, spacing=dp(6), size_hint_y=None)
         items.bind(minimum_height=items.setter("height"))
-
+        popup = Popup(title="История дискуссий", content=box, size_hint=(0.94, 0.84))
         for entry in self.history:
-            question = entry.get("question", "Без вопроса")
-            date = entry.get("timestamp", "")
-            btn = Button(
-                text=f"{date}\n{question}",
-                size_hint_y=None, height=dp(66),
-                halign="left", valign="middle",
-                background_normal="", background_color=PANEL_ALT,
-                color=TEXT
-            )
-            btn.bind(
-                on_release=lambda _btn, e=entry:
-                self.open_history_entry(e, popup)
-            )
+            btn = Button(text=f"{entry.get('timestamp', '')}\n{entry.get('question', 'Без темы')}",
+                         size_hint_y=None, height=dp(66), halign="left", valign="middle",
+                         background_normal="", background_color=PANEL_ALT, color=TEXT)
+            btn.bind(on_release=lambda _b, e=entry: self.open_history_entry(e, popup))
             items.add_widget(btn)
-
         scroll.add_widget(items)
         box.add_widget(scroll)
-
         clear_btn = self.make_button("Очистить историю", RED)
         clear_btn.bind(on_release=lambda *_: self.clear_history(popup))
         box.add_widget(clear_btn)
-
-        popup = Popup(
-            title="История дебатов", content=box,
-            size_hint=(0.94, 0.84)
-        )
         popup.open()
 
     def open_history_entry(self, entry, popup):
         popup.dismiss()
-        text = (
-            f"ВОПРОС\n{entry.get('question', '')}\n\n"
-            f"ИТОГ\n{entry.get('final', '')}\n\n"
-            "ОТВЕТЫ УЧАСТНИКОВ\n"
-        )
-        for item in entry.get("transcript", []):
-            if "answer" in item:
-                text += (
-                    f"\nРаунд {item['round']} — {item['name']}\n"
-                    f"{item['answer']}\n"
-                )
-            else:
-                text += (
-                    f"\nРаунд {item.get('round')} — {item.get('name')}\n"
-                    f"Ошибка: {item.get('error')}\n"
-                )
-        self.output.text = text
-        self.status.text = "Просмотр сохранённого дебата"
+        self.output.text = f"ВОПРОС\n{entry.get('question', '')}\n\n{entry.get('final', '')}"
+        self.status.text = "Просмотр сохранённой дискуссии"
 
     def clear_history(self, popup):
         self.history = []
@@ -1154,20 +776,86 @@ class CouncilApp(App):
             if os.path.exists(self.history_path):
                 os.remove(self.history_path)
         except OSError:
-            self.show_notice(
-                "Ошибка", "Не удалось удалить файл истории."
-            )
+            self.show_notice("Ошибка", "Не удалось удалить файл истории.")
+        popup.dismiss()
+
+    def estimate_cost(self, settings, model_id, prompt, answer):
+        model = next((m for m in settings.get("models", []) if m.get("id") == model_id), None)
+        if not model:
+            return None
+        pricing = model.get("pricing", {})
+        try:
+            prompt_price = float(pricing.get("prompt", 0) or 0)
+            completion_price = float(pricing.get("completion", 0) or 0)
+            in_tokens = max(1, len(prompt) // 4)
+            out_tokens = max(1, len(answer) // 4)
+            return round(in_tokens * prompt_price + out_tokens * completion_price, 8)
+        except (TypeError, ValueError):
+            return None
+
+    def export_latest(self, *_):
+        text = getattr(self.output, "text", "")
+        if not text.strip():
+            self.show_notice("Экспорт", "Пока нечего экспортировать.")
+            return
+        filename = "ai_council_" + time.strftime("%Y%m%d_%H%M%S") + ".txt"
+        path = os.path.join(self.user_data_dir, filename)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            self.show_notice("Экспорт готов", "Текстовый отчёт сохранён в приватной папке приложения:\n" + path)
+        except OSError as exc:
+            self.show_notice("Ошибка экспорта", str(exc))
+
+    def show_comparison(self, *_):
+        if not self.history:
+            self.show_notice("Сравнение", "Сначала проведи дебаты — тогда появятся оценки.")
+            return
+        entry = self.history[0]
+        rows = []
+        for item in entry.get("transcript", []):
+            if "answer" not in item:
+                continue
+            cost = item.get("estimated_cost_usd")
+            cost_text = ("~$" + f"{cost:.6f}") if isinstance(cost, (int, float)) else "н/д"
+            rows.append(f"Раунд {item.get('round')} · {item.get('name')}\n"
+                        f"Фактическая модель: {item.get('used_model', item.get('name'))}\n"
+                        f"Оценка стоимости: {cost_text}\n"
+                        f"Длина ответа: {len(item.get('answer', ''))} символов")
+        self.show_notice("Сравнение участников", "\n\n".join(rows[:12]) or "Нет ответов для сравнения.")
+
+    def show_presets(self, *_):
+        presets = [
+            ("Технологии", "Сравни два подхода к решению задачи. Приведи доказательства, риски, стоимость и условия, при которых каждый подход лучше."),
+            ("Бизнес-идея", "Оцени бизнес-идею с позиции предпринимателя, критика, финансового аналитика и клиента. Укажи гипотезы, риски и дешёвые способы проверки."),
+            ("Научный вопрос", "Разбери вопрос научно: отдели подтверждённые факты от гипотез, перечисли альтернативные объяснения и укажи, какие данные нужны для вывода."),
+            ("Выбор продукта", "Сравни варианты по критериям, найди компромиссы, неизвестные параметры и сформулируй рекомендацию с оговорками."),
+            ("Дебаты за и против", "Сформулируй сильнейшие аргументы за и против позиции. Затем найди общие основания, спорные предпосылки и взвешенный вывод.")
+        ]
+        box = BoxLayout(orientation="vertical", padding=dp(10), spacing=dp(6))
+        popup = Popup(title="Шаблоны дискуссий", content=box, size_hint=(0.92, 0.72))
+        for title, prompt in presets:
+            btn = self.make_button(title, PANEL_ALT)
+            btn.bind(on_release=lambda _b, p=prompt: self._apply_preset(p, popup))
+            box.add_widget(btn)
+        popup.open()
+
+    def _apply_preset(self, prompt, popup):
+        self.question.text = prompt
         popup.dismiss()
 
     def show_notice(self, title, message):
-        Popup(
-            title=title,
-            content=Label(
-                text=message, color=TEXT,
-                text_size=(Window.width * 0.78, None)
-            ),
-            size_hint=(0.88, 0.35)
-        ).open()
+        body = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(10))
+        label = Label(text=message, color=TEXT, halign="left", valign="middle",
+                      text_size=(Window.width * 0.78, None))
+        body.add_widget(label)
+        close = self.make_button("Понятно", ACCENT, width=dp(110))
+        close.pos_hint = {"center_x": 0.5}
+        body.add_widget(close)
+        popup = Popup(title=title, content=body, size_hint=(0.88, 0.34))
+        close.bind(on_release=popup.dismiss)
+        popup.open()
+
 
 if __name__ == "__main__":
     CouncilApp().run()
