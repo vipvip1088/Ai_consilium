@@ -1,4 +1,4 @@
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 # -*- coding: utf-8 -*-
 """
 AI Council — improved Kivy app.
@@ -10,9 +10,13 @@ import json
 import os
 import threading
 import time
+import sys
+import traceback
+import urllib.error
+import urllib.request
+import ssl
+import certifi
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
-import requests
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.core.window import Window
@@ -42,6 +46,52 @@ GREEN = (0.30, 0.83, 0.63, 1)
 RED = (1.0, 0.36, 0.42, 1)
 
 
+def http_json(url, payload=None, headers=None, timeout=60):
+    """Small JSON HTTP client using only the Python standard library.
+
+    This deliberately avoids importing requests/charset_normalizer at startup,
+    since those packages caused an Android packaging error in the supplied log.
+    """
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    request_headers = {"Accept": "application/json", "User-Agent": "AI-Council/2.0.1"}
+    if headers:
+        request_headers.update(headers)
+    if data is not None and "Content-Type" not in request_headers:
+        request_headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(
+        url, data=data, headers=request_headers,
+        method="POST" if data is not None else "GET",
+    )
+    try:
+        tls_context = ssl.create_default_context(cafile=certifi.where())
+        with urllib.request.urlopen(request, timeout=timeout, context=tls_context) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        raw = ""
+        try:
+            raw = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        message = raw[:180] or str(exc.reason or "HTTP error")
+        try:
+            error_data = json.loads(raw).get("error", {})
+            if isinstance(error_data, dict):
+                message = str(error_data.get("message") or message)
+        except (ValueError, AttributeError, TypeError):
+            pass
+        raise RuntimeError(f"HTTP {exc.code}: {message[:180]}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        raise RuntimeError(f"NETWORK: {type(reason).__name__}: {str(reason)[:140]}") from exc
+    try:
+        result = json.loads(raw)
+    except ValueError as exc:
+        raise RuntimeError("Сервер вернул невалидный JSON") from exc
+    if not isinstance(result, dict):
+        raise RuntimeError("Сервер вернул неожиданный формат JSON")
+    return result
+
+
 class Card(BoxLayout):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -60,6 +110,52 @@ class Card(BoxLayout):
 
 class CouncilApp(App):
     def build(self):
+        try:
+            return self._build_ui()
+        except Exception:
+            exc_info = sys.exc_info()
+            report = "".join(traceback.format_exception(*exc_info))
+            write_crash_report(self, exc_info)
+            return self._build_error_screen(report)
+
+    def _build_error_screen(self, report):
+        self.title = "AI Council — ошибка запуска"
+        try:
+            Window.clearcolor = (0.08, 0.025, 0.035, 1)
+        except Exception:
+            pass
+        root = BoxLayout(orientation="vertical", padding=dp(10), spacing=dp(8))
+        root.add_widget(Label(
+            text="[b]Не удалось запустить AI Council[/b]", markup=True,
+            color=(1, 0.72, 0.72, 1), font_size="18sp",
+            size_hint_y=None, height=dp(42), halign="left"))
+        root.add_widget(Label(
+            text="Ошибка сохранена в ai_council_crash.log. Ниже — подробности; можно сделать скриншот или скопировать текст.",
+            color=(1, 1, 1, 1), font_size="12sp", size_hint_y=None,
+            height=dp(48), halign="left"))
+        details = TextInput(text=report, readonly=True, multiline=True,
+                            font_size="10sp", size_hint=(1, 1),
+                            background_color=(0.05, 0.05, 0.07, 1),
+                            foreground_color=(0.95, 0.95, 0.95, 1),
+                            cursor_blink=False)
+        root.add_widget(details)
+        actions = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
+        copy_btn = Button(text="Скопировать ошибку", size_hint_x=1)
+        copy_status = Label(text="", color=(0.7, 1, 0.8, 1), size_hint_x=1)
+        def copy_report(*_):
+            try:
+                from kivy.core.clipboard import Clipboard
+                Clipboard.copy(report)
+                copy_status.text = "Скопировано — вставь в чат"
+            except Exception:
+                copy_status.text = "Выдели текст выше вручную"
+        copy_btn.bind(on_release=copy_report)
+        actions.add_widget(copy_btn)
+        actions.add_widget(copy_status)
+        root.add_widget(actions)
+        return root
+
+    def _build_ui(self):
         self.title = "AI Council"
         Window.clearcolor = BG
         self.cancel_event = threading.Event()
@@ -162,7 +258,7 @@ class CouncilApp(App):
         self.update_toggle_labels()
         content.add_widget(opt_card)
 
-        # Participants: card grows with the list instead of clipping extra rows.
+        # Participants
         self.people_card = Card(orientation="vertical", size_hint_y=None)
         self.people_card.add_widget(self.heading("Участники"))
         self.people_list = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(7))
@@ -433,9 +529,8 @@ class CouncilApp(App):
 
     def _fetch_catalog(self):
         try:
-            response = requests.get(API_ROOT + "/models", timeout=REQUEST_TIMEOUT)
-            response.raise_for_status()
-            data = response.json().get("data", [])
+            response_data = http_json(API_ROOT + "/models", timeout=REQUEST_TIMEOUT[1])
+            data = response_data.get("data", [])
             models = [m for m in data if isinstance(m, dict) and m.get("id")]
             models.sort(key=lambda m: str(m.get("name", m["id"])).lower())
             self.models = models
@@ -566,20 +661,21 @@ class CouncilApp(App):
         self._debate_thread.start()
 
     def request_model(self, key, model_id, prompt):
-        headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json",
-                   "X-Title": "AI Council"}
-        payload = {"model": model_id, "messages": [{"role": "user", "content": prompt}],
-                   "temperature": 0.6, "max_tokens": 2500}
-        response = requests.post(API_ROOT + "/chat/completions", headers=headers,
-                                 json=payload, timeout=REQUEST_TIMEOUT)
-        if response.status_code != 200:
-            try:
-                error_data = response.json().get("error", {})
-                message = error_data.get("message", "")
-            except (ValueError, AttributeError):
-                message = response.text[:160]
-            raise RuntimeError(f"HTTP {response.status_code}: {str(message)[:180]}")
-        data = response.json()
+        headers = {
+            "Authorization": "Bearer " + key,
+            "Content-Type": "application/json",
+            "X-Title": "AI Council",
+        }
+        payload = {
+            "model": model_id,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.6,
+            "max_tokens": 2500,
+        }
+        data = http_json(
+            API_ROOT + "/chat/completions", payload=payload,
+            headers=headers, timeout=REQUEST_TIMEOUT[1],
+        )
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
@@ -612,16 +708,12 @@ class CouncilApp(App):
                     return None, candidate, "Остановлено пользователем"
                 try:
                     return self.request_model(settings["key"], candidate, prompt), candidate, None
-                except requests.RequestException as exc:
-                    errors.append(f"{candidate}: {type(exc).__name__}")
-                    if attempt + 1 < attempts:
-                        self.cancel_event.wait(min(2 ** attempt, 4))
-                        continue
-                    break
                 except RuntimeError as exc:
                     error = str(exc)
                     errors.append(f"{candidate}: {error}")
-                    transient = any(code in error for code in ("HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504"))
+                    transient = error.startswith("NETWORK:") or any(
+                        code in error for code in ("HTTP 408", "HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504")
+                    )
                     if transient and attempt + 1 < attempts:
                         self.cancel_event.wait(min(2 ** attempt, 4))
                         continue
@@ -857,5 +949,37 @@ class CouncilApp(App):
         popup.open()
 
 
+def write_crash_report(app, exc_info):
+    report = "".join(traceback.format_exception(*exc_info))
+    candidates = []
+    try:
+        candidates.append(os.path.join(app.user_data_dir, "ai_council_crash.log"))
+    except Exception:
+        pass
+    try:
+        candidates.append(os.path.join(os.path.expanduser("~"), "ai_council_crash.log"))
+    except Exception:
+        pass
+    candidates.append(os.path.join(os.getcwd(), "ai_council_crash.log"))
+    for path in candidates:
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("AI Council startup/runtime crash report\n")
+                f.write(report)
+            return path
+        except Exception:
+            continue
+    return None
+
+
 if __name__ == "__main__":
-    CouncilApp().run()
+    app = CouncilApp()
+    try:
+        app.run()
+    except BaseException:
+        exc_info = sys.exc_info()
+        log_path = write_crash_report(app, exc_info)
+        print("AI Council crashed. Crash report:", log_path or "could not write log", file=sys.stderr)
+        traceback.print_exception(*exc_info)
+        raise
