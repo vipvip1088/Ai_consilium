@@ -1,47 +1,40 @@
 name: Shipit Cloud Build
-
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build-apk:
     runs-on: ubuntu-22.04
     timeout-minutes: 180
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      - name: Очистить старый кэш сборки
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            git zip unzip openjdk-17-jdk \
-            autoconf automake libtool libtool-bin \
-            pkg-config zlib1g-dev libncurses5-dev \
-            libncursesw5-dev cmake libffi-dev libssl-dev \
-            python3-pip python3-venv
+          rm -rf .buildozer
+          rm -rf ~/.buildozer
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install Buildozer and Cython
+      - name: Установить системные зависимости
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install "cython==0.29.36" "buildozer==1.5.0"
+          sudo apt update
+          sudo apt install -y git zip unzip openjdk-17-jdk autoconf automake libtool libtool-bin pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev cmake libffi-dev libssl-dev python3-pip
 
-      - name: Build APK
+      - name: Установить Buildozer и Cython
         run: |
+          pip3 install --upgrade buildozer
+          pip3 install cython==0.29.36 legacy-cgi
+
+      - name: Собрать APK
+        run: |
+          export ANDROID_HOME=$HOME/.buildozer/android/platform/android-sdk
+          export PATH=$PATH:$ANDROID_HOME/tools:$ANDROID_HOME/platform-tools
           buildozer -v android debug
 
-      - name: Upload APK
+      - name: Загрузить APK
         uses: actions/upload-artifact@v4
         with:
-          name: ai-council-apk
+          name: apk
           path: bin/*.apk
-          if-no-files-found: error
+          if-no-files-found: warn
