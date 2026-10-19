@@ -12,6 +12,7 @@ import threading
 import time
 import sys
 import traceback
+import http.client
 import urllib.error
 import urllib.request
 import ssl
@@ -80,9 +81,12 @@ def http_json(url, payload=None, headers=None, timeout=60):
         except (ValueError, AttributeError, TypeError):
             pass
         raise RuntimeError(f"HTTP {exc.code}: {message[:180]}") from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except (http.client.IncompleteRead, http.client.HTTPException,
+            urllib.error.URLError, TimeoutError, OSError) as exc:
         reason = getattr(exc, "reason", exc)
-        raise RuntimeError(f"NETWORK: {type(reason).__name__}: {str(reason)[:140]}") from exc
+        raise RuntimeError(
+            f"NETWORK: {type(reason).__name__}: {str(reason)[:140]}"
+        ) from exc
     try:
         result = json.loads(raw)
     except ValueError as exc:
