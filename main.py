@@ -307,14 +307,18 @@ class CouncilApp(App):
         self.status = Label(text="Готов к работе · OpenRouter", color=GREEN,
                             size_hint_y=None, height=dp(24), halign="left")
         result_card.add_widget(self.status)
-        self.output = Label(
+        self.output = TextInput(
             text="Здесь появятся ответы участников и заключение судьи.",
-            color=TEXT, font_size="13sp", size_hint_y=None,
-            halign="left", valign="top")
-        self.output.bind(width=self._output_width, texture_size=self._output_texture)
-        out_scroll = ScrollView(do_scroll_x=False, bar_width=dp(3))
-        out_scroll.add_widget(self.output)
-        result_card.add_widget(out_scroll)
+            readonly=True,
+            multiline=True,
+            foreground_color=TEXT,
+            background_color=PANEL_ALT,
+            font_size="13sp",
+            size_hint=(1, 1),
+            padding=[dp(8), dp(8)],
+            cursor_blink=False,
+        )
+        result_card.add_widget(self.output)
         content.add_widget(result_card)
 
         scroll.add_widget(content)
