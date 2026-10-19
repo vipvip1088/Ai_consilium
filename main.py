@@ -111,6 +111,9 @@ class Card(BoxLayout):
 class CouncilApp(App):
     def build(self):
         try:
+            os.makedirs(self.user_data_dir, exist_ok=True)
+            self.config_path = os.path.join(self.user_data_dir, "council_config.json")
+            self.history_path = os.path.join(self.user_data_dir, "council_history.json")
             return self._build_ui()
         except Exception:
             exc_info = sys.exc_info()
