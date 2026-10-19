@@ -174,7 +174,7 @@ class CouncilApp(App):
 
         self.config_path = os.path.join(self.user_data_dir, "council_config.json")
         self.history_path = os.path.join(self.user_data_dir, "council_history.json")
-        self.load_config()
+        self.load_council_config()
         self.load_history()
 
         root = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(10))
@@ -332,7 +332,7 @@ class CouncilApp(App):
     def _output_texture(self, widget, size):
         widget.height = max(dp(40), size[1])
 
-    def load_config(self):
+    def load_council_config(self):
         self.config = {}
         self.api_key = ""
         self.rounds_value = 3
