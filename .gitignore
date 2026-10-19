@@ -1,0 +1,11 @@
+*.bak
+.env
+*.apk
+*.aab
+__pycache__/
+*.pyc
+.buildozer/
+build/
+bin/
+.gradle/
+council_config.json

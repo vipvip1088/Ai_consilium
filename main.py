@@ -283,11 +283,14 @@ class CouncilApp(App):
         content.add_widget(self.people_card)
 
         # Judge
-        judge_card = Card(orientation="vertical", size_hint_y=None, height=dp(94))
+        judge_card = Card(orientation="vertical", size_hint_y=None, height=dp(142))
         judge_card.add_widget(self.heading("Судья"))
         self.judge_btn = self.make_button(self.judge_model or "Выбрать модель судьи", PANEL_ALT)
         self.judge_btn.bind(on_release=lambda *_: self.open_model_picker(callback=self.set_judge))
         judge_card.add_widget(self.judge_btn)
+        judge_api_btn = self.make_button("API судьи", PANEL_ALT)
+        judge_api_btn.bind(on_release=self.open_judge_api_settings)
+        judge_card.add_widget(judge_api_btn)
         content.add_widget(judge_card)
 
         # Output
@@ -344,21 +347,34 @@ class CouncilApp(App):
         self.fallback_enabled = True
         self.continue_enabled = True
         self.judge_model = ""
+
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
             self.config = loaded if isinstance(loaded, dict) else {}
         except (OSError, ValueError, TypeError):
             self.config = {}
+
         self.api_key = str(self.config.get("api_key", ""))
         try:
-            self.rounds_value = max(1, min(MAX_ROUNDS, int(self.config.get("rounds", 3))))
+            self.rounds_value = max(
+                1, min(MAX_ROUNDS, int(self.config.get("rounds", 3)))
+            )
         except (ValueError, TypeError):
             self.rounds_value = 3
+
         self.retry_enabled = bool(self.config.get("retry", True))
         self.fallback_enabled = bool(self.config.get("fallback", True))
         self.continue_enabled = bool(self.config.get("continue_on_error", True))
+
+        # Настройки подключения судьи. Старый конфиг продолжает работать через OpenRouter.
         self.judge_model = str(self.config.get("judge_model", ""))
+        self.judge_provider = str(self.config.get("judge_provider", "openrouter"))
+        self.judge_api_base_url = str(
+            self.config.get("judge_api_base_url", API_ROOT)
+        ).rstrip("/")
+        self.judge_api_key = str(self.config.get("judge_api_key", ""))
+
         saved = self.config.get("participants", [])
         if isinstance(saved, list):
             for item in saved:
@@ -367,23 +383,60 @@ class CouncilApp(App):
                         "uid": self.next_participant_id,
                         "model": str(item.get("model", "")),
                         "enabled": bool(item.get("enabled", True)),
-                        "role": str(item.get("role", "Эксперт"))
+                        "role": str(item.get("role", "Эксперт")),
+                        "provider": str(item.get("provider", "openrouter")),
+                        "api_base_url": str(
+                            item.get("api_base_url", API_ROOT)
+                        ).rstrip("/"),
+                        "api_key": str(item.get("api_key", "")),
                     })
                     self.next_participant_id += 1
+
         if not self.participants:
             for _ in range(3):
-                self.participants.append({"uid": self.next_participant_id, "model": "", "enabled": True, "role": "Эксперт"})
+                self.participants.append({
+                    "uid": self.next_participant_id,
+                    "model": "",
+                    "enabled": True,
+                    "role": "Эксперт",
+                    "provider": "openrouter",
+                    "api_base_url": API_ROOT,
+                    "api_key": "",
+                })
                 self.next_participant_id += 1
 
     def save_config(self, *_):
         data = {
-            "api_key": self.key_input.text.strip() if hasattr(self, "key_input") else self.api_key,
-            "rounds": int(self.round_slider.value) if hasattr(self, "round_slider") else self.rounds_value,
-            "retry": self.retry_enabled, "fallback": self.fallback_enabled,
+            "api_key": (
+                self.key_input.text.strip()
+                if hasattr(self, "key_input") else self.api_key
+            ),
+            "rounds": (
+                int(self.round_slider.value)
+                if hasattr(self, "round_slider") else self.rounds_value
+            ),
+            "retry": self.retry_enabled,
+            "fallback": self.fallback_enabled,
             "continue_on_error": self.continue_enabled,
             "judge_model": self.judge_model,
-            "participants": [{"model": p["model"], "enabled": p["enabled"], "role": p.get("role", "Эксперт")} for p in self.participants]
+            "judge_provider": getattr(self, "judge_provider", "openrouter"),
+            "judge_api_base_url": getattr(
+                self, "judge_api_base_url", API_ROOT
+            ),
+            "judge_api_key": getattr(self, "judge_api_key", ""),
+            "participants": [
+                {
+                    "model": p.get("model", ""),
+                    "enabled": p.get("enabled", True),
+                    "role": p.get("role", "Эксперт"),
+                    "provider": p.get("provider", "openrouter"),
+                    "api_base_url": p.get("api_base_url", API_ROOT),
+                    "api_key": p.get("api_key", ""),
+                }
+                for p in self.participants
+            ],
         }
+
         try:
             os.makedirs(self.user_data_dir, exist_ok=True)
             temp = self.config_path + ".tmp"
@@ -465,7 +518,7 @@ class CouncilApp(App):
     def add_participant(self, *_):
         if self.busy:
             return
-        self.participants.append({"uid": self.next_participant_id, "model": "", "enabled": True, "role": "Эксперт"})
+        self.participants.append({"uid": self.next_participant_id, "model": "", "enabled": True, "role": "Эксперт", "provider": "openrouter", "api_base_url": API_ROOT, "api_key": ""})
         self.next_participant_id += 1
         self.refresh_participants()
         self.save_config()
@@ -491,7 +544,7 @@ class CouncilApp(App):
             return
         self.people_list.clear_widgets()
         for p in self.participants:
-            row = Card(orientation="horizontal", size_hint_y=None, height=dp(70), padding=dp(8), spacing=dp(5))
+            row = Card(orientation="horizontal", size_hint_y=None, height=dp(70), padding=dp(8), spacing=dp(4))
             details = BoxLayout(orientation="vertical", spacing=dp(2))
             details.add_widget(Label(text=p["model"] or "Модель не выбрана",
                                      color=TEXT, halign="left", valign="middle",
@@ -504,6 +557,9 @@ class CouncilApp(App):
             choose.bind(on_release=lambda _b, uid=p["uid"]: self.open_model_picker(
                 callback=lambda model: self.set_participant_model(uid, model)))
             row.add_widget(choose)
+            api_btn = self.make_button("API", PANEL_ALT, width=dp(48))
+            api_btn.bind(on_release=lambda _b, uid=p["uid"]: self.open_participant_api_settings(uid))
+            row.add_widget(api_btn)
             toggle = self.make_button("Вкл" if p["enabled"] else "Выкл", PANEL_ALT, width=dp(48))
             toggle.bind(on_release=lambda _b, uid=p["uid"]: self.toggle_participant(uid))
             row.add_widget(toggle)
@@ -513,6 +569,121 @@ class CouncilApp(App):
             self.people_list.add_widget(row)
         self.people_list.height = sum(dp(77) for _ in self.participants)
         self.people_card.height = dp(26 + 12 + 8 + 42 + 8) + self.people_list.height
+
+    def open_participant_api_settings(self, uid):
+        if self.busy:
+            self.show_notice("Дебаты выполняются", "Дождись завершения дебатов перед изменением подключения.")
+            return
+
+        participant = next((p for p in self.participants if p["uid"] == uid), None)
+        if participant is None:
+            return
+
+        body = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(8))
+        scroll = ScrollView()
+        fields = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(8))
+        fields.bind(minimum_height=fields.setter("height"))
+
+        def add_field(title, value="", password=False, hint=""):
+            fields.add_widget(self.heading(title))
+            widget = TextInput(
+                text=value,
+                hint_text=hint,
+                password=password,
+                multiline=False,
+                size_hint_y=None,
+                height=dp(44),
+                foreground_color=TEXT,
+                background_color=PANEL_ALT,
+                cursor_color=TEXT,
+            )
+            fields.add_widget(widget)
+            return widget
+
+        provider = add_field(
+            "Провайдер",
+            participant.get("provider", "openrouter"),
+            hint="openrouter или openai-compatible",
+        )
+        base_url = add_field(
+            "Базовый URL API",
+            participant.get("api_base_url", API_ROOT),
+            hint="https://example.com/v1",
+        )
+        api_key = add_field(
+            "API-ключ",
+            participant.get("api_key", ""),
+            password=True,
+            hint="Оставь пустым для общего ключа OpenRouter",
+        )
+        model_id = add_field(
+            "ID модели",
+            participant.get("model", ""),
+            hint="Например: provider/model-name",
+        )
+
+        fields.add_widget(Label(
+            text="Для OpenAI-совместимого API укажи базовый URL, обычно заканчивающийся на /v1. На этом этапе поля сохраняются; переключение провайдера начнёт работать после следующего обновления.",
+            color=MUTED,
+            size_hint_y=None,
+            height=dp(72),
+            text_size=(None, None),
+            halign="left",
+            valign="middle",
+        ))
+
+        scroll.add_widget(fields)
+        body.add_widget(scroll)
+
+        actions = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
+        popup = Popup(
+            title="API участника",
+            content=body,
+            size_hint=(0.94, 0.86),
+            auto_dismiss=True,
+        )
+
+        cancel = self.make_button("Отмена", PANEL_ALT)
+        save = self.make_button("Сохранить", ACCENT)
+
+        def save_fields(*_):
+            chosen_provider = provider.text.strip().lower() or "openrouter"
+            chosen_url = base_url.text.strip().rstrip("/")
+            chosen_model = model_id.text.strip()
+
+            if chosen_provider not in ("openrouter", "openai-compatible"):
+                self.show_notice(
+                    "Неизвестный провайдер",
+                    "Используй openrouter или openai-compatible.",
+                )
+                return
+            if not chosen_url.startswith(("https://", "http://")):
+                self.show_notice("Неверный URL", "URL должен начинаться с https:// или http://.")
+                return
+            if not chosen_model:
+                self.show_notice("Нет модели", "Укажи ID модели.")
+                return
+
+            participant["provider"] = chosen_provider
+            participant["api_base_url"] = chosen_url
+            participant["api_key"] = api_key.text.strip()
+            participant["model"] = chosen_model
+            self.refresh_participants()
+            if not self.save_config():
+                self.show_notice("Ошибка", "Не удалось сохранить настройки.")
+                return
+            popup.dismiss()
+            self.show_notice(
+                "Настройки сохранены",
+                "Подключение будет использовать эти параметры после обновления сетевого обработчика.",
+            )
+
+        cancel.bind(on_release=popup.dismiss)
+        save.bind(on_release=save_fields)
+        actions.add_widget(cancel)
+        actions.add_widget(save)
+        body.add_widget(actions)
+        popup.open()
 
     def set_participant_model(self, uid, model):
         for p in self.participants:
@@ -525,6 +696,116 @@ class CouncilApp(App):
         self.judge_model = model["id"]
         self.judge_btn.text = self.judge_model
         self.save_config()
+
+    def open_judge_api_settings(self, *_):
+        if self.busy:
+            self.show_notice(
+                "Дебаты выполняются",
+                "Дождись завершения дебатов перед изменением подключения."
+            )
+            return
+
+        body = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(8))
+        scroll = ScrollView()
+        fields = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(8))
+        fields.bind(minimum_height=fields.setter("height"))
+
+        def add_field(title, value="", password=False, hint=""):
+            fields.add_widget(self.heading(title))
+            widget = TextInput(
+                text=value,
+                hint_text=hint,
+                password=password,
+                multiline=False,
+                size_hint_y=None,
+                height=dp(44),
+                foreground_color=TEXT,
+                background_color=PANEL_ALT,
+                cursor_color=TEXT,
+            )
+            fields.add_widget(widget)
+            return widget
+
+        provider = add_field(
+            "Провайдер",
+            getattr(self, "judge_provider", "openrouter"),
+            hint="openrouter или openai-compatible",
+        )
+        base_url = add_field(
+            "Базовый URL API",
+            getattr(self, "judge_api_base_url", API_ROOT),
+            hint="https://example.com/v1",
+        )
+        api_key = add_field(
+            "API-ключ судьи",
+            getattr(self, "judge_api_key", ""),
+            password=True,
+            hint="Для OpenRouter можно использовать общий ключ",
+        )
+        fields.add_widget(Label(
+            text=(
+                "Судья использует собственные настройки подключения. "
+                "Для OpenAI-совместимого API укажи URL, обычно заканчивающийся на /v1, "
+                "и отдельный API-ключ."
+            ),
+            color=MUTED,
+            size_hint_y=None,
+            height=dp(72),
+            halign="left",
+            valign="middle",
+        ))
+
+        scroll.add_widget(fields)
+        body.add_widget(scroll)
+        actions = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
+        popup = Popup(
+            title="API судьи",
+            content=body,
+            size_hint=(0.94, 0.86),
+            auto_dismiss=True,
+        )
+        cancel = self.make_button("Отмена", PANEL_ALT)
+        save = self.make_button("Сохранить", ACCENT)
+
+        def save_fields(*_):
+            chosen_provider = provider.text.strip().lower() or "openrouter"
+            chosen_url = base_url.text.strip().rstrip("/")
+            chosen_key = api_key.text.strip()
+
+            if chosen_provider not in ("openrouter", "openai-compatible"):
+                self.show_notice(
+                    "Неизвестный провайдер",
+                    "Используй openrouter или openai-compatible."
+                )
+                return
+            if not chosen_url.startswith(("https://", "http://")):
+                self.show_notice(
+                    "Неверный URL",
+                    "URL должен начинаться с https:// или http://."
+                )
+                return
+            if chosen_provider == "openai-compatible" and not chosen_key:
+                self.show_notice(
+                    "Нет API-ключа",
+                    "Для OpenAI-совместимого API нужен отдельный ключ судьи."
+                )
+                return
+
+            self.judge_provider = chosen_provider
+            self.judge_api_base_url = chosen_url
+            self.judge_api_key = chosen_key
+            if not self.save_config():
+                self.show_notice("Ошибка", "Не удалось сохранить настройки.")
+                return
+            popup.dismiss()
+            self.show_notice("Настройки сохранены", "Подключение судьи обновлено.")
+
+        cancel.bind(on_release=popup.dismiss)
+        save.bind(on_release=save_fields)
+        actions.add_widget(cancel)
+        actions.add_widget(save)
+        body.add_widget(actions)
+        popup.open()
 
     def load_catalog(self, *_):
         if self.catalog_loading or self.busy:
@@ -638,9 +919,6 @@ class CouncilApp(App):
             return
         key = self.key_input.text.strip()
         question = self.question.text.strip()
-        if not key:
-            self.show_notice("Нужен API-ключ", "Введи ключ OpenRouter и нажми «Сохранить».")
-            return
         if not question:
             self.show_notice("Нет темы", "Напиши вопрос или тему для обсуждения.")
             return
@@ -648,9 +926,39 @@ class CouncilApp(App):
         if len(active) < 2:
             self.show_notice("Мало участников", "Выбери минимум две включённые модели.")
             return
+
+        missing_keys = []
+        for p in active:
+            provider = p.get("provider", "openrouter")
+            own_key = (p.get("api_key") or "").strip()
+            if provider == "openai-compatible" and not own_key:
+                missing_keys.append(p.get("model", "участник"))
+            elif provider == "openrouter" and not (own_key or key):
+                missing_keys.append(p.get("model", "участник"))
+        if missing_keys:
+            self.show_notice(
+                "Не хватает API-ключей",
+                "Укажи ключи в настройках участников: " + ", ".join(missing_keys[:4])
+            )
+            return
+
         if not self.judge_model:
             self.judge_model = active[0]["model"]
             self.judge_btn.text = self.judge_model
+        if getattr(self, "judge_provider", "openrouter") == "openai-compatible":
+            if not (getattr(self, "judge_api_key", "") or "").strip():
+                self.show_notice(
+                    "Нет ключа судьи",
+                    "Укажи API-ключ в настройках подключения судьи."
+                )
+                return
+        elif not (getattr(self, "judge_api_key", "") or key).strip():
+            self.show_notice(
+                "Нет ключа судьи",
+                "Для судьи нужен общий ключ OpenRouter или отдельный ключ судьи."
+            )
+            return
+
         self.save_config()
         self.cancel_event.clear()
         self.busy = True
@@ -667,9 +975,26 @@ class CouncilApp(App):
         self._debate_thread = threading.Thread(target=self.run_debate, args=(settings,), daemon=True)
         self._debate_thread.start()
 
-    def request_model(self, key, model_id, prompt):
+    def request_model(self, key, model_id, prompt, connection=None):
+        connection = connection or {}
+        provider = connection.get("provider", "openrouter")
+        base_url = (connection.get("api_base_url") or API_ROOT).strip().rstrip("/")
+        own_key = (connection.get("api_key") or "").strip()
+
+        if provider == "openai-compatible":
+            api_key = own_key
+            if not api_key:
+                raise RuntimeError("Для этого участника не задан API-ключ")
+        else:
+            api_key = own_key or (key or "").strip()
+            if not api_key:
+                raise RuntimeError("Не задан API-ключ OpenRouter")
+
+        if not base_url.startswith(("https://", "http://")):
+            raise RuntimeError("Base URL должен начинаться с https:// или http://")
+
         headers = {
-            "Authorization": "Bearer " + key,
+            "Authorization": "Bearer " + api_key,
             "Content-Type": "application/json",
             "X-Title": "AI Council",
         }
@@ -680,22 +1005,26 @@ class CouncilApp(App):
             "max_tokens": 2500,
         }
         data = http_json(
-            API_ROOT + "/chat/completions", payload=payload,
+            base_url + "/chat/completions", payload=payload,
             headers=headers, timeout=REQUEST_TIMEOUT[1],
         )
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
-            raise RuntimeError("OpenRouter вернул ответ неожиданного формата")
+            raise RuntimeError("API вернул ответ неожиданного формата")
         if isinstance(content, list):
             content = "\n".join(part.get("text", "") for part in content if isinstance(part, dict))
         if not isinstance(content, str) or not content.strip():
             raise RuntimeError("Модель вернула пустой ответ")
         return content.strip()
 
-    def ask_safely(self, settings, model_id, prompt):
+    def ask_safely(self, settings, model_id, prompt, connection=None):
+        connection = connection or {}
+        provider = connection.get("provider", "openrouter")
         candidates = [model_id]
-        if settings["fallback"]:
+
+        # Автоподбор бесплатных моделей применим только к каталогу OpenRouter.
+        if provider == "openrouter" and settings["fallback"]:
             for model in settings["models"]:
                 pricing = model.get("pricing", {})
                 try:
@@ -707,6 +1036,7 @@ class CouncilApp(App):
                     candidates.append(mid)
                 if len(candidates) >= 4:
                     break
+
         errors = []
         for candidate in candidates:
             attempts = 3 if settings["retry"] else 1
@@ -714,7 +1044,9 @@ class CouncilApp(App):
                 if self.cancel_event.is_set():
                     return None, candidate, "Остановлено пользователем"
                 try:
-                    return self.request_model(settings["key"], candidate, prompt), candidate, None
+                    return self.request_model(
+                        settings.get("key", ""), candidate, prompt, connection
+                    ), candidate, None
                 except RuntimeError as exc:
                     error = str(exc)
                     errors.append(f"{candidate}: {error}")
@@ -756,7 +1088,7 @@ class CouncilApp(App):
                     for p in settings["participants"]:
                         role_prompt = (f"Твоя роль в совете: {p.get('role', 'Эксперт')}. "
                                        "Рассматривай вопрос с этой перспективы.\n\n" + prompt)
-                        future_map[pool.submit(self.ask_safely, settings, p["model"], role_prompt)] = p
+                        future_map[pool.submit(self.ask_safely, settings, p["model"], role_prompt, p)] = p
                     for future in as_completed(future_map):
                         participant = future_map[future]
                         try:
@@ -795,7 +1127,14 @@ class CouncilApp(App):
                     + "\n\n".join(f"Раунд {x['round']} — {x['name']}:\n{x['answer'][:4000]}" for x in successful[-15:])
                 )
                 self.publish("Судья анализирует результаты…")
-                judge_answer, actual_judge, judge_error = self.ask_safely(settings, settings["judge"], judge_prompt)
+                judge_connection = {
+                    "provider": getattr(self, "judge_provider", "openrouter"),
+                    "api_base_url": getattr(self, "judge_api_base_url", API_ROOT),
+                    "api_key": getattr(self, "judge_api_key", ""),
+                }
+                judge_answer, actual_judge, judge_error = self.ask_safely(
+                    settings, settings["judge"], judge_prompt, judge_connection
+                )
                 if judge_answer:
                     total_cost = sum(x.get("estimated_cost_usd", 0) or 0 for x in successful)
                     final_answer = (f"ИТОГ СУДЬИ · {actual_judge}\n\n{judge_answer}\n\n"
