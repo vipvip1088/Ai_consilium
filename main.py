@@ -294,19 +294,40 @@ class CouncilApp(App):
         content.add_widget(judge_card)
 
         # Output
-        result_card = Card(orientation="vertical", size_hint_y=None, height=dp(360))
+        result_card = Card(orientation="vertical", size_hint_y=None, height=dp(400))
         result_card.add_widget(self.heading("Дискуссия"))
-        result_tools = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(6))
+
+        result_tools = BoxLayout(
+            orientation="vertical", size_hint_y=None,
+            height=dp(76), spacing=dp(4)
+        )
+        tools_top = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(6))
+
         export_btn = self.make_button("Экспорт TXT", PANEL_ALT)
         export_btn.bind(on_release=self.export_latest)
         compare_btn = self.make_button("Сравнить", PANEL_ALT)
         compare_btn.bind(on_release=self.show_comparison)
-        result_tools.add_widget(export_btn)
-        result_tools.add_widget(compare_btn)
+        tools_top.add_widget(export_btn)
+        tools_top.add_widget(compare_btn)
+
+        tools_bottom = BoxLayout(size_hint_y=None, height=dp(36), spacing=dp(6))
+        copy_btn = self.make_button("Копировать всё", PANEL_ALT)
+        copy_btn.bind(on_release=self.copy_output)
+        select_btn = self.make_button("Выделить всё", PANEL_ALT)
+        select_btn.bind(on_release=self.select_output)
+        tools_bottom.add_widget(copy_btn)
+        tools_bottom.add_widget(select_btn)
+
+        result_tools.add_widget(tools_top)
+        result_tools.add_widget(tools_bottom)
         result_card.add_widget(result_tools)
-        self.status = Label(text="Готов к работе · OpenRouter", color=GREEN,
-                            size_hint_y=None, height=dp(24), halign="left")
+
+        self.status = Label(
+            text="Готов к работе · OpenRouter", color=GREEN,
+            size_hint_y=None, height=dp(24), halign="left"
+        )
         result_card.add_widget(self.status)
+
         self.output = TextInput(
             text="Здесь появятся ответы участников и заключение судьи.",
             readonly=True,
@@ -949,19 +970,7 @@ class CouncilApp(App):
         if not self.judge_model:
             self.judge_model = active[0]["model"]
             self.judge_btn.text = self.judge_model
-        if getattr(self, "judge_provider", "openrouter") == "openai-compatible":
-            if not (getattr(self, "judge_api_key", "") or "").strip():
-                self.show_notice(
-                    "Нет ключа судьи",
-                    "Укажи API-ключ в настройках подключения судьи."
-                )
-                return
-        elif not (getattr(self, "judge_api_key", "") or key).strip():
-            self.show_notice(
-                "Нет ключа судьи",
-                "Для судьи нужен общий ключ OpenRouter или отдельный ключ судьи."
-            )
-            return
+        # Итоговый анализ выполняет координатор; отдельный ключ судьи не нужен.
 
         self.save_config()
         self.cancel_event.clear()
@@ -1070,45 +1079,115 @@ class CouncilApp(App):
         question = settings["question"]
         transcript, successful = [], []
         final_answer = ""
+        coordinator_plan = ""
+        coordinator = settings["participants"][0]
         try:
             for round_no in range(1, settings["rounds"] + 1):
                 if self.cancel_event.is_set():
                     break
                 self.publish(f"Раунд {round_no}/{settings['rounds']} — собираю ответы…")
                 if round_no == 1:
-                    prompt = ("Ты участник интеллектуальных дебатов. Ответь самостоятельно, "
-                              "обоснуй позицию и отметь неопределённость.\n\nВопрос: " + question)
+                    prompt = (
+                        "Ты координатор интеллектуального совета и полноценный участник.\n"
+                        "В одном ответе составь план обсуждения и дай собственную аргументированную позицию. "
+                        "Назначь участникам персональные аналитические задачи с учётом их ролей. "
+                        "Укажи спорные утверждения и то, что требует проверки.\n\n"
+                        f"Вопрос: {question}\n\nУчастники совета:\n"
+                        + "\n".join(
+                            f"- {p['model']} (роль: {p.get('role', 'Эксперт')})"
+                            for p in settings["participants"]
+                        )
+                        + "\n\nИспользуй заголовки «ПЛАН СОВЕТА» и «МОЯ ПОЗИЦИЯ»."
+                    )
                 else:
                     recent = successful[-min(12, len(successful)):]
-                    previous = "\n\n".join(f"{x['name']}:\n{x['answer'][:3500]}" for x in recent)
-                    prompt = ("Учитывай свою назначенную роль и анализируй вопрос с её перспективы. "
-                              f"Исходный вопрос: {question}\nРаунд: {round_no}\n\n"
-                              f"Предыдущие ответы:\n{previous}\n\n"
-                              "Критически оцени аргументы других участников, исправь свои ошибки, "
-                              "укажи сильные и слабые стороны и дай улучшенный ответ. Не соглашайся автоматически.")
+                    previous = "\n\n".join(
+                        f"{x['name']}:\n{x['answer'][:3500]}" for x in recent
+                    )
+                    prompt = (
+                        f"План координатора первого раунда:\n{coordinator_plan}\n\n"
+                        "Учитывай свою назначенную роль и анализируй вопрос с её перспективы. "
+                        f"Исходный вопрос: {question}\nРаунд: {round_no}\n\n"
+                        f"Предыдущие ответы:\n{previous}\n\n"
+                        "Критически оцени аргументы других участников, исправь свои ошибки, "
+                        "укажи сильные и слабые стороны и дай улучшенный ответ. "
+                        "Не соглашайся автоматически."
+                    )
                 round_items = []
-                with ThreadPoolExecutor(max_workers=min(5, len(settings["participants"]))) as pool:
+                remaining = settings["participants"]
+
+                if round_no == 1:
+                    try:
+                        answer, used_model, error = self.ask_safely(
+                            settings, coordinator["model"], prompt, coordinator
+                        )
+                    except Exception as exc:
+                        answer, used_model, error = None, coordinator["model"], type(exc).__name__
+
+                    if answer:
+                        coordinator_plan = answer[:7000]
+                        item = {
+                            "round": round_no, "name": coordinator["model"],
+                            "used_model": used_model, "answer": answer,
+                            "estimated_cost_usd": self.estimate_cost(settings, used_model, prompt, answer)
+                        }
+                        round_items.append(item)
+                        successful.append(item)
+                        self.publish(f"Раунд 1/{settings['rounds']}\nОтвет координатора: {coordinator['model']}\n\n{answer}")
+                    else:
+                        round_items.append({
+                            "round": round_no, "name": coordinator["model"], "error": error
+                        })
+                        self.publish(f"Координатор {coordinator['model']}: {error}")
+
+                    remaining = [p for p in settings["participants"] if p is not coordinator]
+
+                with ThreadPoolExecutor(max_workers=min(5, len(remaining))) as pool:
                     future_map = {}
-                    for p in settings["participants"]:
-                        role_prompt = (f"Твоя роль в совете: {p.get('role', 'Эксперт')}. "
-                                       "Рассматривай вопрос с этой перспективы.\n\n" + prompt)
-                        future_map[pool.submit(self.ask_safely, settings, p["model"], role_prompt, p)] = p
+                    for p in remaining:
+                        if round_no == 1:
+                            role_prompt = (
+                                f"Твоя персональная роль: {p.get('role', 'Эксперт')}.\n"
+                                f"Вопрос пользователя: {question}\n\n"
+                                "Учитывай следующий план координатора, но проверяй его критически "
+                                "и сохраняй независимость суждений. Если плана нет, рассуждай самостоятельно.\n\n"
+                                f"План и позиция координатора:\n{coordinator_plan or 'План недоступен; используй свою роль.'}\n\n"
+                                "Дай свой аргументированный ответ."
+                            )
+                        else:
+                            role_prompt = (
+                                f"Твоя роль в совете: {p.get('role', 'Эксперт')}. "
+                                "Рассматривай вопрос с этой перспективы.\n\n" + prompt
+                            )
+                        future_map[pool.submit(
+                            self.ask_safely, settings, p["model"], role_prompt, p
+                        )] = p
+
                     for future in as_completed(future_map):
                         participant = future_map[future]
                         try:
                             answer, used_model, error = future.result()
                         except Exception as exc:
                             answer, used_model, error = None, participant["model"], type(exc).__name__
+
                         if answer:
-                            item = {"round": round_no, "name": participant["model"],
-                                    "used_model": used_model, "answer": answer,
-                                    "estimated_cost_usd": self.estimate_cost(settings, used_model, prompt, answer)}
+                            item = {
+                                "round": round_no, "name": participant["model"],
+                                "used_model": used_model, "answer": answer,
+                                "estimated_cost_usd": self.estimate_cost(
+                                    settings, used_model, prompt, answer
+                                )
+                            }
                             round_items.append(item)
                             successful.append(item)
-                            self.publish(f"Раунд {round_no}/{settings['rounds']}\n"
-                                         f"Ответ получен: {participant['model']}\n\n{answer}")
+                            self.publish(
+                                f"Раунд {round_no}/{settings['rounds']}\n"
+                                f"Ответ получен: {participant['model']}\n\n{answer}"
+                            )
                         else:
-                            round_items.append({"round": round_no, "name": participant["model"], "error": error})
+                            round_items.append({
+                                "round": round_no, "name": participant["model"], "error": error
+                            })
                             self.publish(f"{participant['model']}: {error}")
                 transcript.extend(round_items)
                 if self.cancel_event.is_set():
@@ -1124,33 +1203,29 @@ class CouncilApp(App):
                 final_answer = "Участники не ответили. Проверь API-ключ, баланс/лимиты и доступность моделей."
             else:
                 judge_prompt = (
-                    "Ты независимый судья интеллектуальных дебатов.\n"
+                    "Ты координатор совета и итоговый арбитр. Критически перепроверь также собственные аргументы.\n"
                     f"Вопрос: {question}\n\nОцени качество аргументов, выдели согласия, разногласия, "
                     "сильные стороны и возможные ошибки. Не придумывай факты. Не считай отсутствие "
                     "ответа доказательством проигрыша. Заверши обоснованным выводом.\n\n"
                     + "\n\n".join(f"Раунд {x['round']} — {x['name']}:\n{x['answer'][:4000]}" for x in successful[-15:])
                 )
-                self.publish("Судья анализирует результаты…")
-                judge_connection = {
-                    "provider": getattr(self, "judge_provider", "openrouter"),
-                    "api_base_url": getattr(self, "judge_api_base_url", API_ROOT),
-                    "api_key": getattr(self, "judge_api_key", ""),
-                }
+                self.publish("Координатор анализирует результаты и выносит итог…")
                 judge_answer, actual_judge, judge_error = self.ask_safely(
-                    settings, settings["judge"], judge_prompt, judge_connection
+                    settings, coordinator["model"], judge_prompt, coordinator
                 )
                 if judge_answer:
-                    total_cost = sum(x.get("estimated_cost_usd", 0) or 0 for x in successful)
-                    final_answer = (f"ИТОГ СУДЬИ · {actual_judge}\n\n{judge_answer}\n\n"
+                    judge_cost = self.estimate_cost(settings, actual_judge, judge_prompt, judge_answer)
+                    total_cost = sum(x.get("estimated_cost_usd", 0) or 0 for x in successful) + (judge_cost or 0)
+                    final_answer = (f"ИТОГ КООРДИНАТОРА · {actual_judge}\n\n{judge_answer}\n\n"
                                     f"Оценочная стоимость известных моделей: ~${total_cost:.6f} USD "
                                     "(оценка по длине текста, не счёт OpenRouter).\n\n"
                                     + self.format_transcript(transcript))
                 else:
-                    final_answer = f"Не удалось получить итог судьи: {judge_error}\n\n" + self.format_transcript(transcript)
+                    final_answer = f"Не удалось получить итог координатора: {judge_error}\n\n" + self.format_transcript(transcript)
 
             entry = {"timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                      "question": question, "rounds": settings["rounds"],
-                     "judge": settings["judge"], "transcript": transcript, "final": final_answer}
+                     "judge": coordinator["model"], "transcript": transcript, "final": final_answer}
             Clock.schedule_once(lambda _dt, e=entry: self.save_history(e))
             Clock.schedule_once(lambda _dt, result=final_answer: self.finish_debate(result))
         except Exception as exc:
@@ -1236,18 +1311,180 @@ class CouncilApp(App):
             return None
 
     def export_latest(self, *_):
-        text = getattr(self.output, "text", "")
-        if not text.strip():
+        report_text = getattr(self.output, "text", "")
+        if not report_text.strip():
             self.show_notice("Экспорт", "Пока нечего экспортировать.")
             return
+
         filename = "ai_council_" + time.strftime("%Y%m%d_%H%M%S") + ".txt"
+
+        from kivy.utils import platform
+
+        if platform == "android":
+            android_activity = None
+            self._pending_export_text = report_text
+            self._pending_export_filename = filename
+            self._export_request_code = 6427
+
+            try:
+                from android import activity as android_activity
+                from jnius import autoclass, cast
+
+                Intent = autoclass("android.content.Intent")
+
+                try:
+                    PythonActivity = autoclass("org.kivy.android.PythonActivity")
+                except Exception:
+                    PythonActivity = autoclass("org.renpy.android.PythonActivity")
+
+                current_activity = cast(
+                    "android.app.Activity", PythonActivity.mActivity
+                )
+
+                intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
+                intent.addCategory(Intent.CATEGORY_OPENABLE)
+                intent.setType("text/plain")
+                intent.putExtra(Intent.EXTRA_TITLE, filename)
+
+                android_activity.bind(
+                    on_activity_result=self._on_export_activity_result
+                )
+                current_activity.startActivityForResult(
+                    intent, self._export_request_code
+                )
+                return
+
+            except Exception as exc:
+                if android_activity is not None:
+                    try:
+                        android_activity.unbind(
+                            on_activity_result=self._on_export_activity_result
+                        )
+                    except Exception:
+                        pass
+
+                self._pending_export_text = None
+                self._pending_export_filename = None
+                self.show_notice(
+                    "Ошибка экспорта",
+                    "Не удалось открыть диалог сохранения:\n" + str(exc)
+                )
+                return
+
+        # Экспорт вне Android оставляем в папку приложения.
         path = os.path.join(self.user_data_dir, filename)
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(text)
-            self.show_notice("Экспорт готов", "Текстовый отчёт сохранён в приватной папке приложения:\n" + path)
+            with open(path, "w", encoding="utf-8") as file:
+                file.write(report_text)
+            self.show_notice(
+                "Экспорт готов",
+                "Текстовый отчёт сохранён:\n" + path
+            )
         except OSError as exc:
             self.show_notice("Ошибка экспорта", str(exc))
+
+    def _on_export_activity_result(self, request_code, result_code, intent):
+        if request_code != getattr(self, "_export_request_code", -1):
+            return
+
+        try:
+            from android import activity
+            activity.unbind(
+                on_activity_result=self._on_export_activity_result
+            )
+        except Exception:
+            pass
+
+        report_text = getattr(self, "_pending_export_text", "")
+        filename = getattr(
+            self, "_pending_export_filename", "ai_council.txt"
+        )
+        self._pending_export_text = None
+        self._pending_export_filename = None
+
+        # Android RESULT_OK == -1.
+        if int(result_code) != -1 or intent is None:
+            Clock.schedule_once(
+                lambda dt: self.show_notice(
+                    "Экспорт", "Сохранение отменено."
+                ),
+                0
+            )
+            return
+
+        writer = None
+        try:
+            from jnius import autoclass, cast
+
+            uri = intent.getData()
+            if uri is None:
+                raise RuntimeError("Android не вернул место сохранения.")
+
+            try:
+                PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            except Exception:
+                PythonActivity = autoclass("org.renpy.android.PythonActivity")
+
+            current_activity = cast(
+                "android.app.Activity", PythonActivity.mActivity
+            )
+            stream = current_activity.getContentResolver().openOutputStream(uri)
+
+            if stream is None:
+                raise RuntimeError("Не удалось открыть файл для записи.")
+
+            OutputStreamWriter = autoclass("java.io.OutputStreamWriter")
+            writer = OutputStreamWriter(stream, "UTF-8")
+            writer.write(report_text)
+            writer.flush()
+            writer.close()
+            writer = None
+
+        except Exception as exc:
+            if writer is not None:
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+
+            error_message = str(exc)
+            Clock.schedule_once(
+                lambda dt, msg=error_message: self.show_notice(
+                    "Ошибка экспорта", msg
+                ),
+                0
+            )
+            return
+
+        Clock.schedule_once(
+            lambda dt, name=filename: self.show_notice(
+                "Экспорт готов",
+                "Отчёт сохранён:\n" + name
+                + "\n\nПри сохранении можно выбрать папку «Загрузки»."
+            ),
+            0
+        )
+
+    def copy_output(self, *_):
+        report_text = getattr(self.output, "text", "")
+        if not report_text.strip():
+            self.show_notice("Копирование", "Пока нечего копировать.")
+            return
+
+        try:
+            from kivy.core.clipboard import Clipboard
+            Clipboard.copy(report_text)
+            self.status.text = "Весь текст скопирован"
+        except Exception as exc:
+            self.show_notice("Ошибка копирования", str(exc))
+
+    def select_output(self, *_):
+        try:
+            self.output.focus = True
+            self.output.select_all()
+            self.status.text = "Весь текст выделен"
+        except Exception as exc:
+            self.show_notice("Ошибка выделения", str(exc))
 
     def show_comparison(self, *_):
         if not self.history:
